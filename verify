@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+solution="$repository_root/Staffetta.Core.slnx"
+
+dotnet restore "$solution"
+dotnet build "$solution" --configuration Release --no-restore
+dotnet test "$solution" --configuration Release --no-build --no-restore

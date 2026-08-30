@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="src/Staffetta.Core/Staffetta.Core.csproj" />
+  <Project Path="tests/Staffetta.Core.Tests/Staffetta.Core.Tests.csproj" />
+</Solution>
