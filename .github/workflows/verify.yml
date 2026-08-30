@@ -1,0 +1,54 @@
+name: verify
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+      - run: ./verify
+
+  dco:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check Signed-off-by trailers
+        env:
+          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          zero=0000000000000000000000000000000000000000
+          if [[ -z "${BASE_SHA:-}" || "$BASE_SHA" == "$zero" ]]; then
+            range="$HEAD_SHA"
+          else
+            range="$BASE_SHA..$HEAD_SHA"
+          fi
+
+          failed=0
+          while read -r commit; do
+            author_name="$(git show -s --format=%an "$commit")"
+            author_email="$(git show -s --format=%ae "$commit")"
+            trailer="Signed-off-by: $author_name <$author_email>"
+            if ! git show -s --format=%B "$commit" |
+              git interpret-trailers --parse |
+              grep -Fxqi "$trailer"; then
+              echo "::error::Commit $commit is missing '$trailer'."
+              failed=1
+            fi
+          done < <(git rev-list --no-merges "$range")
+
+          exit "$failed"
