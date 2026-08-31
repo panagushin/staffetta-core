@@ -157,6 +157,13 @@ public sealed class BsvHandshakeStateMachineTests
             duplicate,
             BsvHandshakeInput.PeerVersion(MinimumProtocolVersion, PeerNonce + 1));
         AssertTerminal(duplicate, BsvHandshakeTerminalReason.DuplicateVersion);
+
+        var duplicateAfterReady = CreateStartedMachine();
+        CompleteHandshake(duplicateAfterReady);
+        AssertDoneWithoutOutput(
+            duplicateAfterReady,
+            BsvHandshakeInput.PeerVersion(MinimumProtocolVersion, PeerNonce + 1));
+        AssertTerminal(duplicateAfterReady, BsvHandshakeTerminalReason.DuplicateVersion);
     }
 
     [TestMethod]
@@ -306,6 +313,15 @@ public sealed class BsvHandshakeStateMachineTests
         Assert.AreEqual(
             OperationStatus.Done,
             wire.Apply(BsvHandshakeInput.ExternalFailure(), output, out var repeatedWritten));
+        Assert.AreEqual(0, repeatedWritten);
+        AssertTerminal(wire, BsvHandshakeTerminalReason.WireViolation);
+        Assert.AreEqual(
+            OperationStatus.InvalidData,
+            wire.Start(LocalNonce + 1, output, out repeatedWritten));
+        Assert.AreEqual(0, repeatedWritten);
+        Assert.AreEqual(
+            OperationStatus.InvalidData,
+            wire.TryBeginPing(1, output, out repeatedWritten));
         Assert.AreEqual(0, repeatedWritten);
         AssertTerminal(wire, BsvHandshakeTerminalReason.WireViolation);
 
