@@ -11,8 +11,20 @@ public static class VersionPayloadCodec
     public const int MaximumAssociationIdLength = 129;
     public const int RequiredPrefixLength =
         sizeof(int) + sizeof(ulong) + sizeof(long) + NetworkAddressCodec.EncodedLength;
+    public const int MaximumPayloadLength =
+        RequiredPrefixLength +
+        NetworkAddressCodec.EncodedLength +
+        sizeof(ulong) +
+        MaximumBoundedUserAgentPrefixLength +
+        MaximumUserAgentLength +
+        sizeof(int) +
+        sizeof(byte) +
+        MaximumBoundedAssociationIdPrefixLength +
+        MaximumAssociationIdLength;
 
     private const int SourceAndNonceLength = NetworkAddressCodec.EncodedLength + sizeof(ulong);
+    private const int MaximumBoundedUserAgentPrefixLength = 3;
+    private const int MaximumBoundedAssociationIdPrefixLength = 1;
 
     public static OperationStatus TryParse(
         ReadOnlySpan<byte> source,
