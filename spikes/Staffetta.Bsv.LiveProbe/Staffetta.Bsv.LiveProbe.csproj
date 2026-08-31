@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>Staffetta.Bsv.LiveProbe</AssemblyName>
+    <RootNamespace>Staffetta.Bsv.LiveProbe</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Staffetta.Bsv.LiveProbe.Tests" />
+    <ProjectReference Include="../../src/Staffetta.Core/Staffetta.Core.csproj" />
+  </ItemGroup>
+</Project>

@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageReference Include="MSTest.TestAdapter" Version="3.6.3" />
+    <PackageReference Include="MSTest.TestFramework" Version="3.6.3" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../spikes/Staffetta.Bsv.LiveProbe/Staffetta.Bsv.LiveProbe.csproj" />
+    <ProjectReference Include="../../src/Staffetta.Core/Staffetta.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="../Staffetta.Core.Tests/Fixtures/Bsv/headers-mainnet-after-genesis-2000-20260830.bin"
+          Link="Fixtures/Bsv/headers-mainnet-after-genesis-2000-20260830.bin"
+          CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>
