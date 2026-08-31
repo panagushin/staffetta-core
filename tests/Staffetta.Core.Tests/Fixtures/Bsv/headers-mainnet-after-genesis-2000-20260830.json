@@ -1,0 +1,22 @@
+{
+  "Schema": "staffetta-bsv-headers-fixture/v1",
+  "PayloadFile": "headers-mainnet-after-genesis-2000-20260830.bin",
+  "PayloadSha256": "6f08960bc229c31ea566304ec9ac9bc88d36192b33f6ee8055058743b5a25d52",
+  "PayloadByteLength": 162003,
+  "CapturedAtUtc": "2026-08-30T23:12:49Z",
+  "PeerEndpoint": "57.129.76.3:8333",
+  "PeerUserAgent": "/Bitcoin SV:1.2.2/",
+  "CaptureProtocolVersion": 70015,
+  "RequestCommand": "getheaders",
+  "LocatorBlockId": "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f",
+  "HeaderCount": 2000,
+  "FirstBlockId": "00000000839a8e6886ab5951d76f411475428afc90947ee320161bbf18eb6048",
+  "LastBlockId": "00000000dfd5d65c9d8561b4b8f60a63018fe3933ecb131fb37f905f87da951a",
+  "Validates": {
+    "CanonicalCount": true,
+    "RecordFraming": true,
+    "GenesisAnchor": true,
+    "InternalLinkage": true,
+    "DifficultyAdjustmentAlgorithm": false
+  }
+}

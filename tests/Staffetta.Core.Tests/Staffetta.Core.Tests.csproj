@@ -13,4 +13,9 @@
   <ItemGroup>
     <ProjectReference Include="../../src/Staffetta.Core/Staffetta.Core.csproj" />
   </ItemGroup>
+
+  <ItemGroup>
+    <None Update="Fixtures/**/*.bin" CopyToOutputDirectory="PreserveNewest" />
+    <None Update="Fixtures/**/*.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
 </Project>
