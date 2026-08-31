@@ -244,7 +244,7 @@ public sealed class BsvHandshakeIngressAdapter :
         }
     }
 
-    void IMessageIngressSink.OnMessageCompleted(MessageIngressCompletion completion)
+    void IMessageIngressSink.OnMessageCompleted(in MessageIngressResult result)
     {
         if (!_hasActiveFrame)
         {
@@ -253,7 +253,7 @@ public sealed class BsvHandshakeIngressAdapter :
             return;
         }
 
-        if (completion == MessageIngressCompletion.FrameAborted)
+        if (result.Completion == MessageIngressCompletion.FrameAborted)
         {
             _frameAborted = true;
             ResetStagedFrame();

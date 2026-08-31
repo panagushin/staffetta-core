@@ -1,6 +1,7 @@
 using System.Buffers;
 using System.Buffers.Binary;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
+using Staffetta.Core.Protocol.Cryptography;
 using Staffetta.Core.Protocol.Wire;
 
 namespace Staffetta.Core.Tests.Protocol.Wire;
@@ -99,6 +100,9 @@ public sealed class MessageIngressStateMachineTests
         Assert.AreEqual(source.Length, bytesConsumed);
         CollectionAssert.AreEqual(TwoMessageEvents, sink.Events);
         CollectionAssert.AreEqual(secondPayload, sink.Payload.ToArray());
+        Assert.AreEqual(2, sink.Results.Count);
+        Assert.AreEqual(Hash256.DoubleSha256([]), sink.Results[0].PayloadDoubleSha256);
+        Assert.AreEqual(Hash256.DoubleSha256(secondPayload), sink.Results[1].PayloadDoubleSha256);
     }
 
     [TestMethod]
@@ -292,22 +296,99 @@ public sealed class MessageIngressStateMachineTests
     [TestMethod]
     public void AdmissionPolicyCannotHideAReentryAttempt()
     {
-        var frame = EncodeBasic("verack"u8, [], corruptChecksum: false);
+        var frame = EncodeInboundExtended("tx"u8, [1, 2, 3]);
         var sink = new RecordingSink();
         var policy = new CatchingReentrantAdmissionPolicy();
+        var hashPolicy = new RecordingPayloadHashPolicy(shouldCompute: true);
         using var ingress = new MessageIngressStateMachine(
             NetworkMagic,
             MaximumPayloadLength,
             sink,
-            policy);
+            policy,
+            hashPolicy);
         policy.Ingress = ingress;
 
         Assert.AreEqual(OperationStatus.InvalidData, ingress.Consume(frame, out var bytesConsumed));
 
-        Assert.AreEqual(MessageHeaderCodec.BasicHeaderLength, bytesConsumed);
+        Assert.AreEqual(MessageHeaderCodec.ExtendedHeaderLength, bytesConsumed);
         Assert.IsTrue(ingress.IsFaulted);
         Assert.AreEqual(1, policy.Calls);
+        Assert.AreEqual(0, hashPolicy.Calls);
         Assert.AreEqual(0, sink.Events.Count);
+    }
+
+    [TestMethod]
+    public void PayloadHashPolicyRunsOnceAfterAdmissionAndIsSkippedOnRejection()
+    {
+        var frame = EncodeInboundExtended("tx"u8, [1, 2, 3]);
+        var admittedSink = new RecordingSink();
+        var admittedPolicy = new RecordingAdmissionPolicy(isAdmitted: true);
+        var hashPolicy = new RecordingPayloadHashPolicy(shouldCompute: true);
+        using var admitted = new MessageIngressStateMachine(
+            NetworkMagic,
+            MaximumPayloadLength,
+            admittedSink,
+            admittedPolicy,
+            hashPolicy);
+
+        Assert.AreEqual(OperationStatus.Done, admitted.Consume(frame, out _));
+        Assert.AreEqual(1, admittedPolicy.Calls);
+        Assert.AreEqual(1, hashPolicy.Calls);
+
+        var rejectedSink = new RecordingSink();
+        var rejectedPolicy = new RecordingAdmissionPolicy(isAdmitted: false);
+        var skippedHashPolicy = new RecordingPayloadHashPolicy(shouldCompute: true);
+        using var rejected = new MessageIngressStateMachine(
+            NetworkMagic,
+            MaximumPayloadLength,
+            rejectedSink,
+            rejectedPolicy,
+            skippedHashPolicy);
+
+        Assert.AreEqual(OperationStatus.InvalidData, rejected.Consume(frame, out var rejectedBytes));
+        Assert.AreEqual(MessageHeaderCodec.ExtendedHeaderLength, rejectedBytes);
+        Assert.AreEqual(1, rejectedPolicy.Calls);
+        Assert.AreEqual(0, skippedHashPolicy.Calls);
+        Assert.AreEqual(0, rejectedSink.Events.Count);
+    }
+
+    [TestMethod]
+    public void PayloadHashPolicyExceptionAndCaughtReentryFaultBeforeSink()
+    {
+        var frame = EncodeInboundExtended("tx"u8, [1, 2, 3]);
+        var throwingSink = new RecordingSink();
+        var throwingPolicy = new ThrowingPayloadHashPolicy();
+        using var throwing = new MessageIngressStateMachine(
+            NetworkMagic,
+            MaximumPayloadLength,
+            throwingSink,
+            admissionPolicy: null,
+            payloadHashPolicy: throwingPolicy);
+
+        var exceptionBytes = -1;
+        Assert.ThrowsException<ExpectedPolicyException>(() => throwing.Consume(frame, out exceptionBytes));
+        Assert.AreEqual(MessageHeaderCodec.ExtendedHeaderLength, exceptionBytes);
+        Assert.IsTrue(throwing.IsFaulted);
+        Assert.AreEqual(1, throwingPolicy.Calls);
+        Assert.AreEqual(0, throwingSink.Events.Count);
+
+        var reentrantSink = new RecordingSink();
+        var reentrantPolicy = new CatchingReentrantPayloadHashPolicy();
+        using var reentrant = new MessageIngressStateMachine(
+            NetworkMagic,
+            MaximumPayloadLength,
+            reentrantSink,
+            admissionPolicy: null,
+            payloadHashPolicy: reentrantPolicy);
+        reentrantPolicy.Ingress = reentrant;
+
+        Assert.AreEqual(OperationStatus.InvalidData, reentrant.Consume(frame, out var reentrantBytes));
+        Assert.AreEqual(MessageHeaderCodec.ExtendedHeaderLength, reentrantBytes);
+        Assert.IsTrue(reentrant.IsFaulted);
+        Assert.AreEqual(1, reentrantPolicy.Calls);
+        Assert.AreEqual(0, reentrantSink.Events.Count);
+        Assert.AreEqual(OperationStatus.InvalidData, reentrant.Consume(frame, out var retryBytes));
+        Assert.AreEqual(0, retryBytes);
     }
 
     [TestMethod]
@@ -331,6 +412,47 @@ public sealed class MessageIngressStateMachineTests
 
         AssertCommittedMessage(sink, payload);
         Assert.AreEqual(MessageHeaderFormat.Extended, sink.Headers.Single().Format);
+    }
+
+    [TestMethod]
+    public void OptedInExtendedFrameReturnsFullDigestAtEverySplit()
+    {
+        byte[] payload = [10, 20, 30, 40, 50];
+        var frame = EncodeInboundExtended("tx"u8, payload);
+        var expectedHash = Hash256.DoubleSha256(payload);
+
+        for (var split = 0; split <= frame.Length; split++)
+        {
+            var sink = new RecordingSink();
+            var policy = new RecordingPayloadHashPolicy(shouldCompute: true);
+            using var ingress = new MessageIngressStateMachine(
+                NetworkMagic,
+                MaximumPayloadLength,
+                sink,
+                admissionPolicy: null,
+                payloadHashPolicy: policy);
+
+            var firstStatus = ingress.Consume(frame.AsSpan(0, split), out var firstConsumed);
+            Assert.AreEqual(split, firstConsumed, $"split {split}");
+            if (split < frame.Length)
+            {
+                Assert.AreEqual(OperationStatus.NeedMoreData, firstStatus, $"split {split}");
+                Assert.AreEqual(
+                    OperationStatus.Done,
+                    ingress.Consume(frame.AsSpan(split), out var secondConsumed),
+                    $"split {split}");
+                Assert.AreEqual(frame.Length - split, secondConsumed, $"split {split}");
+            }
+            else
+            {
+                Assert.AreEqual(OperationStatus.Done, firstStatus, $"split {split}");
+            }
+
+            Assert.AreEqual(1, policy.Calls, $"split {split}");
+            Assert.AreEqual(1, sink.Results.Count, $"split {split}");
+            Assert.AreEqual(MessageIngressCompletion.FrameValidated, sink.Results[0].Completion);
+            Assert.AreEqual(expectedHash, sink.Results[0].PayloadDoubleSha256);
+        }
     }
 
     [TestMethod]
@@ -408,6 +530,7 @@ public sealed class MessageIngressStateMachineTests
         Assert.IsTrue(ingress.IsFaulted);
         CollectionAssert.AreEqual(WrongChecksumEvents, sink.Events);
         CollectionAssert.AreEqual(badPayload, sink.Payload.ToArray());
+        Assert.IsNull(sink.Results.Single().PayloadDoubleSha256);
 
         Assert.AreEqual(
             OperationStatus.InvalidData,
@@ -501,6 +624,7 @@ public sealed class MessageIngressStateMachineTests
         Assert.IsTrue(ingress.IsCompleted);
         Assert.IsTrue(ingress.IsFaulted);
         CollectionAssert.AreEqual(TruncatedPayloadEvents, sink.Events);
+        Assert.IsNull(sink.Results.Single().PayloadDoubleSha256);
     }
 
     [TestMethod]
@@ -686,9 +810,16 @@ public sealed class MessageIngressStateMachineTests
     {
         Assert.AreEqual(1, sink.Headers.Count);
         CollectionAssert.AreEqual(expectedPayload, sink.Payload.ToArray());
-        CollectionAssert.AreEqual(
-            new[] { MessageIngressCompletion.FrameValidated },
-            sink.Completions);
+        Assert.AreEqual(1, sink.Results.Count);
+        Assert.AreEqual(MessageIngressCompletion.FrameValidated, sink.Results[0].Completion);
+        if (sink.Headers[0].Format == MessageHeaderFormat.Basic)
+        {
+            Assert.AreEqual(Hash256.DoubleSha256(expectedPayload), sink.Results[0].PayloadDoubleSha256);
+        }
+        else
+        {
+            Assert.IsNull(sink.Results[0].PayloadDoubleSha256);
+        }
     }
 
     private sealed class RecordingSink : IMessageIngressSink
@@ -697,7 +828,7 @@ public sealed class MessageIngressStateMachineTests
 
         public List<byte> Payload { get; } = [];
 
-        public List<MessageIngressCompletion> Completions { get; } = [];
+        public List<MessageIngressResult> Results { get; } = [];
 
         public List<string> Events { get; } = [];
 
@@ -721,10 +852,10 @@ public sealed class MessageIngressStateMachineTests
             Events.Add($"payload:{payload.Length}");
         }
 
-        public void OnMessageCompleted(MessageIngressCompletion completion)
+        public void OnMessageCompleted(in MessageIngressResult result)
         {
-            Completions.Add(completion);
-            Events.Add(completion == MessageIngressCompletion.FrameValidated ? "commit" : "abort");
+            Results.Add(result);
+            Events.Add(result.Completion == MessageIngressCompletion.FrameValidated ? "commit" : "abort");
         }
     }
 
@@ -742,7 +873,7 @@ public sealed class MessageIngressStateMachineTests
             throw new ExpectedSinkException();
         }
 
-        public void OnMessageCompleted(MessageIngressCompletion completion)
+        public void OnMessageCompleted(in MessageIngressResult result)
         {
             Assert.Fail("Completion must not be delivered after a payload callback exception.");
         }
@@ -764,7 +895,7 @@ public sealed class MessageIngressStateMachineTests
         {
         }
 
-        public void OnMessageCompleted(MessageIngressCompletion completion)
+        public void OnMessageCompleted(in MessageIngressResult result)
         {
         }
     }
@@ -785,7 +916,7 @@ public sealed class MessageIngressStateMachineTests
         {
         }
 
-        public void OnMessageCompleted(MessageIngressCompletion completion)
+        public void OnMessageCompleted(in MessageIngressResult result)
         {
         }
     }
@@ -814,7 +945,7 @@ public sealed class MessageIngressStateMachineTests
         {
         }
 
-        public void OnMessageCompleted(MessageIngressCompletion completion)
+        public void OnMessageCompleted(in MessageIngressResult result)
         {
             CompletionCalls++;
         }
@@ -841,9 +972,9 @@ public sealed class MessageIngressStateMachineTests
             PayloadBytes += (ulong)payload.Length;
         }
 
-        public void OnMessageCompleted(MessageIngressCompletion completion)
+        public void OnMessageCompleted(in MessageIngressResult result)
         {
-            if (completion == MessageIngressCompletion.FrameAborted)
+            if (result.Completion == MessageIngressCompletion.FrameAborted)
             {
                 AbortCalls++;
             }
@@ -893,6 +1024,49 @@ public sealed class MessageIngressStateMachineTests
         public int Calls { get; private set; }
 
         public bool IsAdmitted(in MessageHeader header)
+        {
+            Calls++;
+            try
+            {
+                Ingress!.ConsumeSingleFrame([], out _);
+            }
+            catch (InvalidOperationException)
+            {
+            }
+
+            return true;
+        }
+    }
+
+    private sealed class RecordingPayloadHashPolicy(bool shouldCompute) : IMessageIngressPayloadHashPolicy
+    {
+        public int Calls { get; private set; }
+
+        public bool ShouldComputeDoubleSha256(in MessageHeader header)
+        {
+            Calls++;
+            return shouldCompute;
+        }
+    }
+
+    private sealed class ThrowingPayloadHashPolicy : IMessageIngressPayloadHashPolicy
+    {
+        public int Calls { get; private set; }
+
+        public bool ShouldComputeDoubleSha256(in MessageHeader header)
+        {
+            Calls++;
+            throw new ExpectedPolicyException();
+        }
+    }
+
+    private sealed class CatchingReentrantPayloadHashPolicy : IMessageIngressPayloadHashPolicy
+    {
+        public MessageIngressStateMachine? Ingress { get; set; }
+
+        public int Calls { get; private set; }
+
+        public bool ShouldComputeDoubleSha256(in MessageHeader header)
         {
             Calls++;
             try

@@ -1,6 +1,7 @@
 using System.Buffers;
 using System.Buffers.Binary;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
+using Staffetta.Core.Protocol.Cryptography;
 using Staffetta.Core.Protocol.Wire;
 
 namespace Staffetta.Core.Tests.Protocol.Wire;
@@ -42,6 +43,9 @@ public sealed class MessagePayloadValidatorTests
         Assert.AreEqual(Payload.Length, bytesConsumed);
         Assert.IsTrue(validator.IsCompleted);
         Assert.AreEqual<ulong>(0, validator.RemainingLength);
+        Assert.AreEqual(
+            OperationStatus.InvalidData,
+            validator.TryGetPayloadDoubleSha256(out _));
     }
 
     [TestMethod]
@@ -98,6 +102,10 @@ public sealed class MessagePayloadValidatorTests
             basicValidator.Consume([], out var basicBytesConsumed));
         Assert.AreEqual(0, basicBytesConsumed);
         Assert.IsTrue(basicValidator.IsCompleted);
+        Assert.AreEqual(
+            OperationStatus.Done,
+            basicValidator.TryGetPayloadDoubleSha256(out var basicHash));
+        Assert.AreEqual(Hash256.DoubleSha256([]), basicHash);
 
         var extendedHeader = ParseInboundExtendedHeader((ulong)Payload.Length);
         using var extendedValidator = CreateValidator(extendedHeader);
@@ -106,6 +114,28 @@ public sealed class MessagePayloadValidatorTests
             extendedValidator.Consume(Payload, out var extendedBytesConsumed));
         Assert.AreEqual(Payload.Length, extendedBytesConsumed);
         Assert.IsTrue(extendedValidator.IsCompleted);
+        Assert.AreEqual(
+            OperationStatus.InvalidData,
+            extendedValidator.TryGetPayloadDoubleSha256(out _));
+
+        Assert.AreEqual(
+            OperationStatus.Done,
+            MessagePayloadValidator.TryCreate(
+                extendedHeader,
+                computeExtendedDoubleSha256: true,
+                out var hashingExtendedValidator));
+        Assert.IsNotNull(hashingExtendedValidator);
+        using (hashingExtendedValidator)
+        {
+            Assert.AreEqual(
+                OperationStatus.Done,
+                hashingExtendedValidator.Consume(Payload, out var hashingBytesConsumed));
+            Assert.AreEqual(Payload.Length, hashingBytesConsumed);
+            Assert.AreEqual(
+                OperationStatus.Done,
+                hashingExtendedValidator.TryGetPayloadDoubleSha256(out var extendedHash));
+            Assert.AreEqual(Hash256.DoubleSha256(Payload), extendedHash);
+        }
     }
 
     [TestMethod]
@@ -150,6 +180,10 @@ public sealed class MessagePayloadValidatorTests
 
         Assert.IsTrue(validator.IsCompleted);
         Assert.AreEqual<ulong>(0, validator.RemainingLength);
+        Assert.AreEqual(
+            OperationStatus.Done,
+            validator.TryGetPayloadDoubleSha256(out var payloadHash));
+        Assert.AreEqual(Hash256.DoubleSha256(Payload), payloadHash);
     }
 
     private static MessagePayloadValidator CreateValidator(in MessageHeader header)

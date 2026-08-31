@@ -16,5 +16,5 @@ public interface IMessageIngressSink
     /// </remarks>
     void OnProvisionalPayload(ReadOnlySpan<byte> payload);
 
-    void OnMessageCompleted(MessageIngressCompletion completion);
+    void OnMessageCompleted(in MessageIngressResult result);
 }

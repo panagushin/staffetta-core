@@ -1,4 +1,5 @@
 using System.Buffers;
+using Staffetta.Core.Protocol.Cryptography;
 
 namespace Staffetta.Core.Protocol.Wire;
 
@@ -6,7 +7,7 @@ namespace Staffetta.Core.Protocol.Wire;
 /// Incrementally frames wire messages without retaining their payloads.
 /// </summary>
 /// <remarks>
-/// Instances are single-consumer and not thread-safe. Sink callbacks and admission policies
+/// Instances are single-consumer and not thread-safe. Sink callbacks and ingress policies
 /// cannot call Consume, <see cref="ConsumeSingleFrame"/>, <see cref="CompleteEndOfInput"/>, or
 /// <see cref="Dispose"/> on the same instance. A malformed frame, an admission rejection, or an
 /// exception from a callback permanently faults the instance. Callback exceptions are propagated
@@ -18,12 +19,13 @@ public sealed class MessageIngressStateMachine : IDisposable
     private readonly ulong _maximumPayloadLength;
     private readonly IMessageIngressSink _sink;
     private readonly IMessageIngressAdmissionPolicy? _admissionPolicy;
+    private readonly IMessageIngressPayloadHashPolicy? _payloadHashPolicy;
     private readonly byte[] _headerBuffer = new byte[MessageHeaderCodec.ExtendedHeaderLength];
 
     private MessagePayloadValidator? _payloadValidator;
     private int _headerLength;
     private bool _isConsuming;
-    private bool _isEvaluatingAdmission;
+    private bool _isEvaluatingPolicy;
     private bool _isCompleted;
     private bool _isFaulted;
     private bool _isDisposed;
@@ -32,7 +34,12 @@ public sealed class MessageIngressStateMachine : IDisposable
         ReadOnlySpan<byte> expectedNetworkMagic,
         ulong maximumPayloadLength,
         IMessageIngressSink sink)
-        : this(expectedNetworkMagic, maximumPayloadLength, sink, admissionPolicy: null)
+        : this(
+            expectedNetworkMagic,
+            maximumPayloadLength,
+            sink,
+            admissionPolicy: null,
+            payloadHashPolicy: null)
     {
     }
 
@@ -41,6 +48,16 @@ public sealed class MessageIngressStateMachine : IDisposable
         ulong maximumPayloadLength,
         IMessageIngressSink sink,
         IMessageIngressAdmissionPolicy? admissionPolicy)
+        : this(expectedNetworkMagic, maximumPayloadLength, sink, admissionPolicy, payloadHashPolicy: null)
+    {
+    }
+
+    public MessageIngressStateMachine(
+        ReadOnlySpan<byte> expectedNetworkMagic,
+        ulong maximumPayloadLength,
+        IMessageIngressSink sink,
+        IMessageIngressAdmissionPolicy? admissionPolicy,
+        IMessageIngressPayloadHashPolicy? payloadHashPolicy)
     {
         if (expectedNetworkMagic.Length != MessageHeaderCodec.NetworkMagicLength)
         {
@@ -53,6 +70,7 @@ public sealed class MessageIngressStateMachine : IDisposable
         _maximumPayloadLength = maximumPayloadLength;
         _sink = sink ?? throw new ArgumentNullException(nameof(sink));
         _admissionPolicy = admissionPolicy;
+        _payloadHashPolicy = payloadHashPolicy;
     }
 
     public bool IsCompleted => _isCompleted;
@@ -82,7 +100,7 @@ public sealed class MessageIngressStateMachine : IDisposable
         bytesConsumed = 0;
         if (_isConsuming)
         {
-            _isFaulted |= _isEvaluatingAdmission;
+            _isFaulted |= _isEvaluatingPolicy;
             throw new InvalidOperationException("Message ingress cannot be re-entered.");
         }
 
@@ -146,7 +164,7 @@ public sealed class MessageIngressStateMachine : IDisposable
         ObjectDisposedException.ThrowIf(_isDisposed, this);
         if (_isConsuming)
         {
-            _isFaulted |= _isEvaluatingAdmission;
+            _isFaulted |= _isEvaluatingPolicy;
             throw new InvalidOperationException("Message ingress cannot be completed from a sink callback.");
         }
 
@@ -166,7 +184,7 @@ public sealed class MessageIngressStateMachine : IDisposable
             _payloadValidator.Dispose();
             _payloadValidator = null;
             _isFaulted = true;
-            NotifyCompleted(MessageIngressCompletion.FrameAborted);
+            NotifyCompleted(new MessageIngressResult(MessageIngressCompletion.FrameAborted, null));
             return OperationStatus.InvalidData;
         }
 
@@ -188,7 +206,7 @@ public sealed class MessageIngressStateMachine : IDisposable
 
         if (_isConsuming)
         {
-            _isFaulted |= _isEvaluatingAdmission;
+            _isFaulted |= _isEvaluatingPolicy;
             throw new InvalidOperationException("Message ingress cannot be disposed from a sink callback.");
         }
 
@@ -247,9 +265,24 @@ public sealed class MessageIngressStateMachine : IDisposable
             return OperationStatus.InvalidData;
         }
 
-        if (!IsAdmitted(header) ||
-            _isFaulted ||
-            MessagePayloadValidator.TryCreate(header, out _payloadValidator) != OperationStatus.Done ||
+        if (!IsAdmitted(header))
+        {
+            Fault();
+            return OperationStatus.InvalidData;
+        }
+
+        if (_isFaulted)
+        {
+            Fault();
+            return OperationStatus.InvalidData;
+        }
+
+        var computeExtendedDoubleSha256 = ShouldComputeDoubleSha256(header);
+        if (_isFaulted ||
+            MessagePayloadValidator.TryCreate(
+                header,
+                computeExtendedDoubleSha256,
+                out _payloadValidator) != OperationStatus.Done ||
             _payloadValidator is null)
         {
             Fault();
@@ -280,17 +313,26 @@ public sealed class MessageIngressStateMachine : IDisposable
             return status;
         }
 
-        validator.Dispose();
-        _payloadValidator = null;
-
         if (status == OperationStatus.Done)
         {
-            NotifyCompleted(MessageIngressCompletion.FrameValidated);
+            Hash256? payloadDoubleSha256 = null;
+            if (validator.TryGetPayloadDoubleSha256(out var payloadHash) == OperationStatus.Done)
+            {
+                payloadDoubleSha256 = payloadHash;
+            }
+
+            validator.Dispose();
+            _payloadValidator = null;
+            NotifyCompleted(new MessageIngressResult(
+                MessageIngressCompletion.FrameValidated,
+                payloadDoubleSha256));
             return status;
         }
 
+        validator.Dispose();
+        _payloadValidator = null;
         _isFaulted = true;
-        NotifyCompleted(MessageIngressCompletion.FrameAborted);
+        NotifyCompleted(new MessageIngressResult(MessageIngressCompletion.FrameAborted, null));
         return OperationStatus.InvalidData;
     }
 
@@ -303,7 +345,7 @@ public sealed class MessageIngressStateMachine : IDisposable
 
         try
         {
-            _isEvaluatingAdmission = true;
+            _isEvaluatingPolicy = true;
             return _admissionPolicy.IsAdmitted(header);
         }
         catch
@@ -313,7 +355,30 @@ public sealed class MessageIngressStateMachine : IDisposable
         }
         finally
         {
-            _isEvaluatingAdmission = false;
+            _isEvaluatingPolicy = false;
+        }
+    }
+
+    private bool ShouldComputeDoubleSha256(in MessageHeader header)
+    {
+        if (_payloadHashPolicy is null || header.Format != MessageHeaderFormat.Extended)
+        {
+            return false;
+        }
+
+        try
+        {
+            _isEvaluatingPolicy = true;
+            return _payloadHashPolicy.ShouldComputeDoubleSha256(header);
+        }
+        catch
+        {
+            Fault();
+            throw;
+        }
+        finally
+        {
+            _isEvaluatingPolicy = false;
         }
     }
 
@@ -343,11 +408,11 @@ public sealed class MessageIngressStateMachine : IDisposable
         }
     }
 
-    private void NotifyCompleted(MessageIngressCompletion completion)
+    private void NotifyCompleted(in MessageIngressResult result)
     {
         try
         {
-            _sink.OnMessageCompleted(completion);
+            _sink.OnMessageCompleted(result);
         }
         catch
         {
