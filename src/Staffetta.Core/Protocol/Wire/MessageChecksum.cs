@@ -1,5 +1,6 @@
 using System.Buffers;
 using System.Buffers.Binary;
+using Staffetta.Core.Protocol.Cryptography;
 
 namespace Staffetta.Core.Protocol.Wire;
 
@@ -23,6 +24,14 @@ public readonly struct MessageChecksum : IEquatable<MessageChecksum>
     public byte Byte3 => (byte)(_littleEndianValue >> 24);
 
     public static MessageChecksum Zero => default;
+
+    public static MessageChecksum Compute(ReadOnlySpan<byte> payload)
+    {
+        var hash = Hash256.DoubleSha256(payload);
+        Span<byte> wireBytes = stackalloc byte[Hash256.Length];
+        hash.WriteWireBytesTo(wireBytes);
+        return FromBytes(wireBytes);
+    }
 
     public static OperationStatus TryCreate(ReadOnlySpan<byte> value, out MessageChecksum checksum)
     {
