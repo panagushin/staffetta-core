@@ -65,6 +65,38 @@ public sealed class LegacyTransactionParserTests
     }
 
     [TestMethod]
+    public void ParserStructurallyPreservesEverySignedOutputValueBoundary()
+    {
+        long[] values =
+        [
+            long.MinValue,
+            -1,
+            0,
+            2_100_000_000_000_000,
+            2_100_000_000_000_001,
+            long.MaxValue,
+        ];
+
+        foreach (var value in values)
+        {
+            var transaction = CreateTransaction(value);
+            var sink = new RecordingSink();
+            using var parser = new LegacyTransactionParser(sink);
+
+            Assert.AreEqual(
+                OperationStatus.Done,
+                parser.Consume(transaction, out var bytesConsumed),
+                $"value {value}");
+            Assert.AreEqual(transaction.Length, bytesConsumed, $"value {value}");
+            Assert.AreEqual(
+                OperationStatus.Done,
+                parser.Commit(out _),
+                $"value {value}");
+            CollectionAssert.AreEqual(new[] { value }, sink.OutputValues, $"value {value}");
+        }
+    }
+
+    [TestMethod]
     public void ParserStreamsHighInputCountWithoutRetainingRecords()
     {
         const int inputCount = 4_000;
@@ -273,7 +305,7 @@ public sealed class LegacyTransactionParserTests
         Assert.IsTrue(parser.IsFaulted);
     }
 
-    private static byte[] CreateTransaction()
+    private static byte[] CreateTransaction(long outputValueSatoshis = 1_000)
     {
         var transaction = new byte[65];
         var offset = 0;
@@ -289,7 +321,7 @@ public sealed class LegacyTransactionParserTests
         BinaryPrimitives.WriteUInt32LittleEndian(transaction.AsSpan(offset), 0xffff_fffe);
         offset += sizeof(uint);
         transaction[offset++] = 1;
-        BinaryPrimitives.WriteInt64LittleEndian(transaction.AsSpan(offset), 1_000);
+        BinaryPrimitives.WriteInt64LittleEndian(transaction.AsSpan(offset), outputValueSatoshis);
         offset += sizeof(long);
         transaction[offset++] = 3;
         transaction[offset++] = 0x51;
@@ -359,6 +391,8 @@ public sealed class LegacyTransactionParserTests
 
         public int InputStartedCount { get; private set; }
 
+        public List<long> OutputValues { get; } = [];
+
         public virtual void OnTransactionStarted(int version, ulong inputCount)
         {
         }
@@ -384,6 +418,7 @@ public sealed class LegacyTransactionParserTests
 
         public void OnOutputStarted(ulong outputIndex, long valueSatoshis, ulong scriptLength)
         {
+            OutputValues.Add(valueSatoshis);
         }
 
         public void OnOutputScriptChunk(ulong outputIndex, ReadOnlySpan<byte> script)
