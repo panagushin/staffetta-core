@@ -21,8 +21,9 @@ public sealed class LegacyTransactionParser : IDisposable
     private const int MaximumScratchLength = Hash256.Length + sizeof(uint);
 
     private readonly ILegacyTransactionSink _sink;
+    private readonly LegacyTransactionHashMode _hashMode;
     private readonly byte[] _scratch = new byte[MaximumScratchLength];
-    private readonly IncrementalHash _firstHash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+    private readonly IncrementalHash? _firstHash;
 
     private IncrementalCompactSizeReader _compactSize;
     private ParseState _state;
@@ -47,8 +48,25 @@ public sealed class LegacyTransactionParser : IDisposable
 
     /// <summary>Creates a reusable parser that reports provisional structure to the sink.</summary>
     public LegacyTransactionParser(ILegacyTransactionSink sink)
+        : this(sink, LegacyTransactionHashMode.Internal)
+    {
+    }
+
+    internal LegacyTransactionParser(
+        ILegacyTransactionSink sink,
+        LegacyTransactionHashMode hashMode)
     {
         _sink = sink ?? throw new ArgumentNullException(nameof(sink));
+        if (hashMode is not LegacyTransactionHashMode.Internal and
+            not LegacyTransactionHashMode.ExternalValidatedPayload)
+        {
+            throw new ArgumentOutOfRangeException(nameof(hashMode));
+        }
+
+        _hashMode = hashMode;
+        _firstHash = hashMode == LegacyTransactionHashMode.Internal
+            ? IncrementalHash.CreateHash(HashAlgorithmName.SHA256)
+            : null;
         _state = ParseState.Version;
     }
 
@@ -101,13 +119,18 @@ public sealed class LegacyTransactionParser : IDisposable
         ObjectDisposedException.ThrowIf(_isDisposed, this);
         summary = default;
         ThrowIfReentrant();
+        if (_hashMode != LegacyTransactionHashMode.Internal)
+        {
+            return OperationStatus.InvalidData;
+        }
+
         if (_isFaulted || _state != ParseState.ReadyToCommit)
         {
             return OperationStatus.InvalidData;
         }
 
         Span<byte> firstHash = stackalloc byte[Hash256.Length];
-        if (!_firstHash.TryGetHashAndReset(firstHash, out var firstHashLength) ||
+        if (!_firstHash!.TryGetHashAndReset(firstHash, out var firstHashLength) ||
             firstHashLength != Hash256.Length)
         {
             FaultAndNotifyAbort();
@@ -122,6 +145,33 @@ public sealed class LegacyTransactionParser : IDisposable
             return OperationStatus.InvalidData;
         }
 
+        return CommitCore(transactionId, out summary);
+    }
+
+    internal OperationStatus Commit(
+        in Hash256 validatedPayloadHash,
+        ulong validatedPayloadLength,
+        out LegacyTransactionSummary summary)
+    {
+        ObjectDisposedException.ThrowIf(_isDisposed, this);
+        summary = default;
+        ThrowIfReentrant();
+        if (_hashMode != LegacyTransactionHashMode.ExternalValidatedPayload ||
+            _isFaulted ||
+            _state != ParseState.ReadyToCommit ||
+            validatedPayloadLength != _serializedLength)
+        {
+            return OperationStatus.InvalidData;
+        }
+
+        // The digest and length jointly identify the byte range validated by the framing layer.
+        return CommitCore(validatedPayloadHash, out summary);
+    }
+
+    private OperationStatus CommitCore(
+        in Hash256 transactionId,
+        out LegacyTransactionSummary summary)
+    {
         summary = new LegacyTransactionSummary(
             _version,
             _inputCount,
@@ -166,8 +216,12 @@ public sealed class LegacyTransactionParser : IDisposable
             throw;
         }
 
-        Span<byte> discardedHash = stackalloc byte[Hash256.Length];
-        _firstHash.TryGetHashAndReset(discardedHash, out _);
+        if (_firstHash is not null)
+        {
+            Span<byte> discardedHash = stackalloc byte[Hash256.Length];
+            _firstHash.TryGetHashAndReset(discardedHash, out _);
+        }
+
         ResetCore();
     }
 
@@ -180,7 +234,7 @@ public sealed class LegacyTransactionParser : IDisposable
         }
 
         ThrowIfReentrant();
-        _firstHash.Dispose();
+        _firstHash?.Dispose();
         _isDisposed = true;
     }
 
@@ -567,7 +621,7 @@ public sealed class LegacyTransactionParser : IDisposable
         }
 
         var serializedLength = checked(_serializedLength + (ulong)accepted.Length);
-        _firstHash.AppendData(accepted);
+        _firstHash?.AppendData(accepted);
         _serializedLength = serializedLength;
         offset += accepted.Length;
     }
@@ -615,4 +669,10 @@ public sealed class LegacyTransactionParser : IDisposable
         LockTime,
         ReadyToCommit,
     }
+}
+
+internal enum LegacyTransactionHashMode
+{
+    Internal,
+    ExternalValidatedPayload,
 }

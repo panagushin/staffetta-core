@@ -234,6 +234,173 @@ public sealed class LegacyTransactionParserTests
     }
 
     [TestMethod]
+    public void ExternalValidatedPayloadHashIsTheOnlyTransactionIdAuthority()
+    {
+        var transaction = CreateTransaction();
+        var controlledHash = CreateHash(0x7b);
+        Assert.AreNotEqual(Hash256.DoubleSha256(transaction), controlledHash);
+        var sink = new RecordingSink();
+        using var parser = new LegacyTransactionParser(
+            sink,
+            LegacyTransactionHashMode.ExternalValidatedPayload);
+
+        AssertChunk(parser, transaction, expectedDone: true);
+        Assert.AreEqual(
+            OperationStatus.Done,
+            parser.Commit(in controlledHash, (ulong)transaction.Length, out var summary));
+
+        Assert.AreEqual(controlledHash, summary.TransactionId);
+        Assert.AreEqual(1, sink.CommitCount);
+    }
+
+    [TestMethod]
+    public void CommitOverloadsRejectTheWrongHashAuthorityWithoutLosingReadyState()
+    {
+        var transaction = CreateTransaction();
+        var controlledHash = CreateHash(0x5c);
+
+        var internalSink = new RecordingSink();
+        using var internalParser = new LegacyTransactionParser(internalSink);
+        AssertChunk(internalParser, transaction, expectedDone: true);
+        Assert.AreEqual(
+            OperationStatus.InvalidData,
+            internalParser.Commit(
+                in controlledHash,
+                (ulong)transaction.Length,
+                out var rejectedExternalSummary));
+        Assert.AreEqual(default, rejectedExternalSummary);
+        Assert.IsTrue(internalParser.IsReadyToCommit);
+        Assert.IsFalse(internalParser.IsFaulted);
+        Assert.AreEqual(OperationStatus.Done, internalParser.Commit(out var internalSummary));
+        Assert.AreEqual(Hash256.DoubleSha256(transaction), internalSummary.TransactionId);
+
+        var externalSink = new RecordingSink();
+        using var externalParser = new LegacyTransactionParser(
+            externalSink,
+            LegacyTransactionHashMode.ExternalValidatedPayload);
+        AssertChunk(externalParser, transaction, expectedDone: true);
+        Assert.AreEqual(OperationStatus.InvalidData, externalParser.Commit(out var rejectedInternalSummary));
+        Assert.AreEqual(default, rejectedInternalSummary);
+        Assert.IsTrue(externalParser.IsReadyToCommit);
+        Assert.IsFalse(externalParser.IsFaulted);
+        Assert.AreEqual(
+            OperationStatus.Done,
+            externalParser.Commit(
+                in controlledHash,
+                (ulong)transaction.Length,
+                out var externalSummary));
+        Assert.AreEqual(controlledHash, externalSummary.TransactionId);
+    }
+
+    [TestMethod]
+    public void ExternalHashAuthorityRequiresTheExactValidatedByteRangeLength()
+    {
+        var transaction = CreateTransaction();
+        byte[] trailing = [0xaa, 0xbb, 0xcc];
+        var framePayload = transaction.Concat(trailing).ToArray();
+        var fullFrameDigest = Hash256.DoubleSha256(framePayload);
+        var transactionDigest = Hash256.DoubleSha256(transaction);
+        var sink = new RecordingSink();
+        using var parser = new LegacyTransactionParser(
+            sink,
+            LegacyTransactionHashMode.ExternalValidatedPayload);
+
+        Assert.AreEqual(OperationStatus.Done, parser.Consume(framePayload, out var consumed));
+        Assert.AreEqual(transaction.Length, consumed);
+        Assert.AreEqual(
+            OperationStatus.InvalidData,
+            parser.Commit(
+                in fullFrameDigest,
+                (ulong)framePayload.Length,
+                out var rejectedSummary));
+        Assert.AreEqual(default, rejectedSummary);
+        Assert.IsTrue(parser.IsReadyToCommit);
+        Assert.IsFalse(parser.IsFaulted);
+        Assert.AreEqual(0, sink.CommitCount);
+
+        Assert.AreEqual(
+            OperationStatus.Done,
+            parser.Commit(
+                in transactionDigest,
+                (ulong)transaction.Length,
+                out var acceptedSummary));
+        Assert.AreEqual(transactionDigest, acceptedSummary.TransactionId);
+        Assert.AreEqual<ulong>((ulong)transaction.Length, acceptedSummary.SerializedLength);
+        Assert.AreEqual(1, sink.CommitCount);
+    }
+
+    [TestMethod]
+    public void InternalHashAuthorityResetsAtEachTransactionSubrange()
+    {
+        var first = CreateTransaction(1_000);
+        var second = CreateTransaction(2_000);
+        var blockPayload = first.Concat(second).ToArray();
+        var sink = new RecordingSink();
+        using var parser = new LegacyTransactionParser(sink);
+
+        Assert.AreEqual(OperationStatus.Done, parser.Consume(blockPayload, out var firstConsumed));
+        Assert.AreEqual(first.Length, firstConsumed);
+        Assert.AreEqual(OperationStatus.Done, parser.Commit(out var firstSummary));
+
+        Assert.AreEqual(
+            OperationStatus.Done,
+            parser.Consume(blockPayload.AsSpan(firstConsumed), out var secondConsumed));
+        Assert.AreEqual(second.Length, secondConsumed);
+        Assert.AreEqual(OperationStatus.Done, parser.Commit(out var secondSummary));
+
+        Assert.AreEqual(Hash256.DoubleSha256(first), firstSummary.TransactionId);
+        Assert.AreEqual(Hash256.DoubleSha256(second), secondSummary.TransactionId);
+        Assert.AreNotEqual(firstSummary.TransactionId, secondSummary.TransactionId);
+        Assert.AreEqual(2, sink.CommitCount);
+    }
+
+    [TestMethod]
+    public void ExternalHashAuthoritySupportsAbortReuseAndFlatWarmPath()
+    {
+        var transaction = CreateHighInputCountTransaction(512, includeScriptByte: true);
+        var firstHash = CreateHash(0x31);
+        var secondHash = CreateHash(0x32);
+        var sink = new CountingSink();
+        using var parser = new LegacyTransactionParser(
+            sink,
+            LegacyTransactionHashMode.ExternalValidatedPayload);
+
+        Assert.AreEqual(
+            OperationStatus.NeedMoreData,
+            parser.Consume(transaction.AsSpan(0, 10), out var partialConsumed));
+        Assert.AreEqual(10, partialConsumed);
+        parser.Abort();
+        Assert.AreEqual(1, sink.AbortCalls);
+
+        Assert.AreEqual(OperationStatus.Done, parser.Consume(transaction, out _));
+        Assert.AreEqual(
+            OperationStatus.Done,
+            parser.Commit(in firstHash, (ulong)transaction.Length, out var firstSummary));
+        Assert.AreEqual(firstHash, firstSummary.TransactionId);
+
+        Assert.AreEqual(OperationStatus.Done, parser.Consume(transaction, out _));
+        Assert.AreEqual(
+            OperationStatus.Done,
+            parser.Commit(in secondHash, (ulong)transaction.Length, out var secondSummary));
+        Assert.AreEqual(secondHash, secondSummary.TransactionId);
+
+        const int iterations = 8;
+        var allSucceeded = true;
+        var before = GC.GetAllocatedBytesForCurrentThread();
+        for (var iteration = 0; iteration < iterations; iteration++)
+        {
+            allSucceeded &= parser.Consume(transaction, out var consumed) == OperationStatus.Done;
+            allSucceeded &= consumed == transaction.Length;
+            allSucceeded &= parser.Commit(in firstHash, (ulong)transaction.Length, out _) ==
+                OperationStatus.Done;
+        }
+
+        var allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+        Assert.IsTrue(allSucceeded);
+        Assert.AreEqual(0L, allocated);
+    }
+
+    [TestMethod]
     public void CaughtReentrancyStillStopsOuterParserBeforeLaterCallbacks()
     {
         var sink = new CaughtReentrantSink();
@@ -375,6 +542,14 @@ public sealed class LegacyTransactionParserTests
         return transaction;
     }
 
+    private static Hash256 CreateHash(byte fill)
+    {
+        Span<byte> bytes = stackalloc byte[Hash256.Length];
+        bytes.Fill(fill);
+        Assert.AreEqual(OperationStatus.Done, Hash256.TryCreate(bytes, out var hash));
+        return hash;
+    }
+
     private class RecordingSink : ILegacyTransactionSink
     {
         public List<byte> InputScript { get; } = [];
@@ -442,6 +617,8 @@ public sealed class LegacyTransactionParserTests
 
         public int OutputsCompleted { get; private set; }
 
+        public int AbortCalls { get; private set; }
+
         public void OnTransactionStarted(int version, ulong inputCount)
         {
         }
@@ -476,6 +653,7 @@ public sealed class LegacyTransactionParserTests
 
         public void OnTransactionAborted()
         {
+            AbortCalls++;
         }
     }
 
