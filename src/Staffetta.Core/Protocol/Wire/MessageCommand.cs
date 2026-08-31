@@ -36,7 +36,9 @@ public readonly struct MessageCommand : IEquatable<MessageCommand>
     {
         command = default;
 
-        if (value.Length > MaximumLength || !ContainsOnlyPrintableAscii(value))
+        if (value.IsEmpty ||
+            value.Length > MaximumLength ||
+            !ContainsOnlyPrintableAscii(value))
         {
             return OperationStatus.InvalidData;
         }

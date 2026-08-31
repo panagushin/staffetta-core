@@ -179,20 +179,85 @@ public sealed class MessageHeaderCodecTests
     }
 
     [TestMethod]
-    public void ParseAcceptsEmptyAndTwelveCharacterCommands()
+    public void InboundParsingAcceptsEmptyCommandWhileOutboundConstructionRejectsIt()
     {
-        Span<byte> empty = stackalloc byte[MessageHeaderCodec.BasicHeaderLength];
         Assert.AreEqual(
-            OperationStatus.Done,
-            MessageHeader.TryCreateBasic([], 0, [0, 0, 0, 0], out var emptyHeader));
+            OperationStatus.InvalidData,
+            MessageCommand.TryCreate([], out _));
         Assert.AreEqual(
-            OperationStatus.Done,
-            MessageHeaderCodec.TryWrite(empty, MainnetMagic, emptyHeader, 0, out _));
-        Assert.AreEqual(
-            OperationStatus.Done,
-            MessageHeaderCodec.TryParse(empty, MainnetMagic, 0, out var parsedEmpty, out _));
-        Assert.AreEqual(0, parsedEmpty.Command.Length);
+            OperationStatus.InvalidData,
+            MessageHeader.TryCreateBasic([], 0, [0, 0, 0, 0], out _));
 
+        Span<byte> inbound = stackalloc byte[MessageHeaderCodec.BasicHeaderLength];
+        inbound.Clear();
+        MainnetMagic.CopyTo(inbound);
+        Assert.AreEqual(
+            OperationStatus.Done,
+            MessageHeaderCodec.TryParse(inbound, MainnetMagic, 0, out var parsed, out var bytesConsumed));
+        Assert.AreEqual(MessageHeaderCodec.BasicHeaderLength, bytesConsumed);
+        Assert.AreEqual(0, parsed.Command.Length);
+
+        Span<byte> outbound = stackalloc byte[MessageHeaderCodec.BasicHeaderLength];
+        outbound.Fill(0xaa);
+        Assert.AreEqual(
+            OperationStatus.InvalidData,
+            MessageHeaderCodec.TryWrite(outbound, MainnetMagic, parsed, 0, out var bytesWritten));
+        Assert.AreEqual(0, bytesWritten);
+        Assert.IsTrue(IsFilledWith(outbound, 0xaa));
+    }
+
+    [TestMethod]
+    public void InboundExtendedParsingAcceptsEmptyInnerCommandWhileOutboundRejectsIt()
+    {
+        Assert.AreEqual(
+            OperationStatus.InvalidData,
+            MessageHeader.TryCreateExtended([], MinimumExtendedPayloadLength, out _));
+
+        Span<byte> inbound = stackalloc byte[MessageHeaderCodec.ExtendedHeaderLength];
+        Assert.AreEqual(
+            OperationStatus.Done,
+            MessageHeader.TryCreateExtended(
+                "block"u8,
+                MinimumExtendedPayloadLength,
+                out var validHeader));
+        Assert.AreEqual(
+            OperationStatus.Done,
+            MessageHeaderCodec.TryWrite(
+                inbound,
+                MainnetMagic,
+                validHeader,
+                MinimumExtendedPayloadLength,
+                out _));
+        inbound.Slice(24, MessageCommand.MaximumLength).Clear();
+
+        Assert.AreEqual(
+            OperationStatus.Done,
+            MessageHeaderCodec.TryParse(
+                inbound,
+                MainnetMagic,
+                MinimumExtendedPayloadLength,
+                out var parsed,
+                out var bytesConsumed));
+        Assert.AreEqual(MessageHeaderCodec.ExtendedHeaderLength, bytesConsumed);
+        Assert.AreEqual(0, parsed.Command.Length);
+
+        Span<byte> outbound = stackalloc byte[MessageHeaderCodec.ExtendedHeaderLength];
+        outbound.Fill(0xaa);
+        Assert.AreEqual(
+            OperationStatus.InvalidData,
+            MessageHeaderCodec.TryWrite(
+                outbound,
+                MainnetMagic,
+                parsed,
+                MinimumExtendedPayloadLength,
+                out var bytesWritten));
+        Assert.AreEqual(0, bytesWritten);
+        Assert.IsTrue(IsFilledWith(outbound, 0xaa));
+    }
+
+    [TestMethod]
+    public void TwelveCharacterCommandRoundTrips()
+    {
         Span<byte> full = stackalloc byte[MessageHeaderCodec.BasicHeaderLength];
         Assert.AreEqual(
             OperationStatus.Done,
@@ -265,12 +330,8 @@ public sealed class MessageHeaderCodecTests
     }
 
     [TestMethod]
-    public void ExtendedHeaderRejectsPayloadAtBasicMaximum()
+    public void InboundParsingAcceptsSmallExtendedPayloadsWhileOutboundConstructionRejectsThem()
     {
-        Assert.AreEqual(
-            OperationStatus.InvalidData,
-            MessageHeader.TryCreateExtended("block"u8, uint.MaxValue, out _));
-
         Span<byte> encoded = stackalloc byte[MessageHeaderCodec.ExtendedHeaderLength];
         Assert.AreEqual(
             OperationStatus.Done,
@@ -284,8 +345,46 @@ public sealed class MessageHeaderCodecTests
                 MinimumExtendedPayloadLength,
                 out _));
 
-        BinaryPrimitives.WriteUInt64LittleEndian(encoded[36..], uint.MaxValue);
-        AssertInvalid(encoded);
+        ReadOnlySpan<ulong> inboundPayloadLengths = [0, 100, uint.MaxValue];
+        Span<byte> outbound = stackalloc byte[MessageHeaderCodec.ExtendedHeaderLength];
+        foreach (var payloadLength in inboundPayloadLengths)
+        {
+            Assert.AreEqual(
+                OperationStatus.InvalidData,
+                MessageHeader.TryCreateExtended("block"u8, payloadLength, out _),
+                $"Outbound payload length {payloadLength}");
+
+            BinaryPrimitives.WriteUInt64LittleEndian(encoded[36..], payloadLength);
+            Assert.AreEqual(
+                OperationStatus.Done,
+                MessageHeaderCodec.TryParse(
+                    encoded,
+                    MainnetMagic,
+                    payloadLength,
+                    out var parsed,
+                    out var bytesConsumed),
+                $"Inbound payload length {payloadLength}");
+            Assert.AreEqual(MessageHeaderCodec.ExtendedHeaderLength, bytesConsumed);
+            Assert.AreEqual(MessageHeaderFormat.Extended, parsed.Format);
+            Assert.AreEqual(payloadLength, parsed.PayloadLength);
+
+            outbound.Fill(0xaa);
+            Assert.AreEqual(
+                OperationStatus.InvalidData,
+                MessageHeaderCodec.TryWrite(
+                    outbound,
+                    MainnetMagic,
+                    parsed,
+                    payloadLength,
+                    out var bytesWritten));
+            Assert.AreEqual(0, bytesWritten);
+            Assert.IsTrue(IsFilledWith(outbound, 0xaa));
+        }
+
+        BinaryPrimitives.WriteUInt64LittleEndian(encoded[36..], 100);
+        Assert.AreEqual(
+            OperationStatus.InvalidData,
+            MessageHeaderCodec.TryParse(encoded, MainnetMagic, 99, out _, out _));
     }
 
     [TestMethod]

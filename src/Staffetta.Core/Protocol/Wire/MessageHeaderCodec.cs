@@ -84,8 +84,7 @@ public static class MessageHeaderCodec
 
         var extendedPayloadLength = BinaryPrimitives.ReadUInt64LittleEndian(
             source.Slice(ExtendedPayloadLengthOffset, sizeof(ulong)));
-        if (extendedPayloadLength <= uint.MaxValue ||
-            extendedPayloadLength > maximumPayloadLength)
+        if (extendedPayloadLength > maximumPayloadLength)
         {
             return OperationStatus.InvalidData;
         }
@@ -116,9 +115,11 @@ public static class MessageHeaderCodec
 
         var requiredLength = header.Format switch
         {
-            MessageHeaderFormat.Basic when header.PayloadLength <= uint.MaxValue &&
+            MessageHeaderFormat.Basic when header.Command.Length > 0 &&
+                header.PayloadLength <= uint.MaxValue &&
                 !header.Command.Equals(ExtendedCommand) => BasicHeaderLength,
-            MessageHeaderFormat.Extended when header.PayloadLength > uint.MaxValue &&
+            MessageHeaderFormat.Extended when header.Command.Length > 0 &&
+                header.PayloadLength > uint.MaxValue &&
                 header.PayloadChecksum == MessageChecksum.Zero => ExtendedHeaderLength,
             _ => 0,
         };
