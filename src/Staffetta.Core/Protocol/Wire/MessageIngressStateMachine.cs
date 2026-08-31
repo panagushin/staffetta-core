@@ -6,21 +6,24 @@ namespace Staffetta.Core.Protocol.Wire;
 /// Incrementally frames wire messages without retaining their payloads.
 /// </summary>
 /// <remarks>
-/// Instances are single-consumer and not thread-safe. Sink callbacks made by <see cref="Consume"/>
-/// cannot call Consume, <see cref="CompleteEndOfInput"/>, or <see cref="Dispose"/> on the same
-/// instance. A malformed frame or an exception from a sink callback permanently faults the
-/// instance. Callback exceptions are propagated and the event that caused one is never replayed.
+/// Instances are single-consumer and not thread-safe. Sink callbacks and admission policies
+/// cannot call Consume, <see cref="ConsumeSingleFrame"/>, <see cref="CompleteEndOfInput"/>, or
+/// <see cref="Dispose"/> on the same instance. A malformed frame, an admission rejection, or an
+/// exception from a callback permanently faults the instance. Callback exceptions are propagated
+/// and the event that caused one is never replayed.
 /// </remarks>
 public sealed class MessageIngressStateMachine : IDisposable
 {
     private readonly byte[] _expectedNetworkMagic;
     private readonly ulong _maximumPayloadLength;
     private readonly IMessageIngressSink _sink;
+    private readonly IMessageIngressAdmissionPolicy? _admissionPolicy;
     private readonly byte[] _headerBuffer = new byte[MessageHeaderCodec.ExtendedHeaderLength];
 
     private MessagePayloadValidator? _payloadValidator;
     private int _headerLength;
     private bool _isConsuming;
+    private bool _isEvaluatingAdmission;
     private bool _isCompleted;
     private bool _isFaulted;
     private bool _isDisposed;
@@ -29,6 +32,15 @@ public sealed class MessageIngressStateMachine : IDisposable
         ReadOnlySpan<byte> expectedNetworkMagic,
         ulong maximumPayloadLength,
         IMessageIngressSink sink)
+        : this(expectedNetworkMagic, maximumPayloadLength, sink, admissionPolicy: null)
+    {
+    }
+
+    public MessageIngressStateMachine(
+        ReadOnlySpan<byte> expectedNetworkMagic,
+        ulong maximumPayloadLength,
+        IMessageIngressSink sink,
+        IMessageIngressAdmissionPolicy? admissionPolicy)
     {
         if (expectedNetworkMagic.Length != MessageHeaderCodec.NetworkMagicLength)
         {
@@ -40,6 +52,7 @@ public sealed class MessageIngressStateMachine : IDisposable
         _expectedNetworkMagic = expectedNetworkMagic.ToArray();
         _maximumPayloadLength = maximumPayloadLength;
         _sink = sink ?? throw new ArgumentNullException(nameof(sink));
+        _admissionPolicy = admissionPolicy;
     }
 
     public bool IsCompleted => _isCompleted;
@@ -48,6 +61,20 @@ public sealed class MessageIngressStateMachine : IDisposable
 
     public OperationStatus Consume(
         ReadOnlySpan<byte> source,
+        out int bytesConsumed) =>
+        ConsumeCore(source, stopAfterFrame: false, out bytesConsumed);
+
+    /// <summary>
+    /// Consumes no more than one wire frame, leaving any following frame untouched.
+    /// </summary>
+    public OperationStatus ConsumeSingleFrame(
+        ReadOnlySpan<byte> source,
+        out int bytesConsumed) =>
+        ConsumeCore(source, stopAfterFrame: true, out bytesConsumed);
+
+    private OperationStatus ConsumeCore(
+        ReadOnlySpan<byte> source,
+        bool stopAfterFrame,
         out int bytesConsumed)
     {
         ObjectDisposedException.ThrowIf(_isDisposed, this);
@@ -55,6 +82,7 @@ public sealed class MessageIngressStateMachine : IDisposable
         bytesConsumed = 0;
         if (_isConsuming)
         {
+            _isFaulted |= _isEvaluatingAdmission;
             throw new InvalidOperationException("Message ingress cannot be re-entered.");
         }
 
@@ -75,7 +103,18 @@ public sealed class MessageIngressStateMachine : IDisposable
             {
                 if (_payloadValidator is null)
                 {
-                    var headerStatus = ConsumeHeader(source[bytesConsumed..], out var headerBytesConsumed);
+                    var headerBytesConsumed = 0;
+                    OperationStatus headerStatus;
+                    try
+                    {
+                        headerStatus = ConsumeHeader(source[bytesConsumed..], out headerBytesConsumed);
+                    }
+                    catch
+                    {
+                        bytesConsumed += headerBytesConsumed;
+                        throw;
+                    }
+
                     bytesConsumed += headerBytesConsumed;
                     if (headerStatus != OperationStatus.Done)
                     {
@@ -90,7 +129,7 @@ public sealed class MessageIngressStateMachine : IDisposable
                     return payloadStatus;
                 }
 
-                if (bytesConsumed == source.Length)
+                if (stopAfterFrame || bytesConsumed == source.Length)
                 {
                     return OperationStatus.Done;
                 }
@@ -107,6 +146,7 @@ public sealed class MessageIngressStateMachine : IDisposable
         ObjectDisposedException.ThrowIf(_isDisposed, this);
         if (_isConsuming)
         {
+            _isFaulted |= _isEvaluatingAdmission;
             throw new InvalidOperationException("Message ingress cannot be completed from a sink callback.");
         }
 
@@ -148,6 +188,7 @@ public sealed class MessageIngressStateMachine : IDisposable
 
         if (_isConsuming)
         {
+            _isFaulted |= _isEvaluatingAdmission;
             throw new InvalidOperationException("Message ingress cannot be disposed from a sink callback.");
         }
 
@@ -182,14 +223,32 @@ public sealed class MessageIngressStateMachine : IDisposable
             out _);
         if (parseStatus == OperationStatus.NeedMoreData)
         {
-            var remainingStatus = ConsumeHeader(
-                source[copiedLength..],
-                out var remainingBytesConsumed);
+            var remainingBytesConsumed = 0;
+            OperationStatus remainingStatus;
+            try
+            {
+                remainingStatus = ConsumeHeader(
+                    source[copiedLength..],
+                    out remainingBytesConsumed);
+            }
+            catch
+            {
+                bytesConsumed = copiedLength + remainingBytesConsumed;
+                throw;
+            }
+
             bytesConsumed = copiedLength + remainingBytesConsumed;
             return remainingStatus;
         }
 
-        if (parseStatus != OperationStatus.Done ||
+        if (parseStatus != OperationStatus.Done)
+        {
+            Fault();
+            return OperationStatus.InvalidData;
+        }
+
+        if (!IsAdmitted(header) ||
+            _isFaulted ||
             MessagePayloadValidator.TryCreate(header, out _payloadValidator) != OperationStatus.Done ||
             _payloadValidator is null)
         {
@@ -233,6 +292,29 @@ public sealed class MessageIngressStateMachine : IDisposable
         _isFaulted = true;
         NotifyCompleted(MessageIngressCompletion.FrameAborted);
         return OperationStatus.InvalidData;
+    }
+
+    private bool IsAdmitted(in MessageHeader header)
+    {
+        if (_admissionPolicy is null)
+        {
+            return true;
+        }
+
+        try
+        {
+            _isEvaluatingAdmission = true;
+            return _admissionPolicy.IsAdmitted(header);
+        }
+        catch
+        {
+            Fault();
+            throw;
+        }
+        finally
+        {
+            _isEvaluatingAdmission = false;
+        }
     }
 
     private void NotifyStarted(in MessageHeader header)
