@@ -173,10 +173,8 @@ public sealed class BsvHandshakeIngressAdapter :
         _processor.OnMessageStarted(header);
     }
 
-    void IMessageIngressSink.OnProvisionalPayload(ReadOnlySpan<byte> payload)
-    {
+    OperationStatus IMessageIngressSink.OnProvisionalPayload(ReadOnlySpan<byte> payload) =>
         _processor.OnProvisionalPayload(payload);
-    }
 
     void IMessageIngressSink.OnMessageCompleted(in MessageIngressResult result)
     {

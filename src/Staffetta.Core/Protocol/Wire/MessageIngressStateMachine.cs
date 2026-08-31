@@ -26,6 +26,8 @@ public sealed class MessageIngressStateMachine : IDisposable
     private int _headerLength;
     private bool _isConsuming;
     private bool _isEvaluatingPolicy;
+    private bool _isCallingSink;
+    private bool _sinkCallbackReentryDetected;
     private bool _isCompleted;
     private bool _isFaulted;
     private bool _isDisposed;
@@ -98,9 +100,10 @@ public sealed class MessageIngressStateMachine : IDisposable
         ObjectDisposedException.ThrowIf(_isDisposed, this);
 
         bytesConsumed = 0;
+        ThrowIfCalledFromSinkCallback("Message ingress cannot be re-entered from a sink callback.");
         if (_isConsuming)
         {
-            _isFaulted |= _isEvaluatingPolicy;
+            MarkReentry();
             throw new InvalidOperationException("Message ingress cannot be re-entered.");
         }
 
@@ -140,7 +143,18 @@ public sealed class MessageIngressStateMachine : IDisposable
                     }
                 }
 
-                var payloadStatus = ConsumePayload(source[bytesConsumed..], out var payloadBytesConsumed);
+                var payloadBytesConsumed = 0;
+                OperationStatus payloadStatus;
+                try
+                {
+                    payloadStatus = ConsumePayload(source[bytesConsumed..], out payloadBytesConsumed);
+                }
+                catch
+                {
+                    bytesConsumed += payloadBytesConsumed;
+                    throw;
+                }
+
                 bytesConsumed += payloadBytesConsumed;
                 if (payloadStatus != OperationStatus.Done)
                 {
@@ -162,9 +176,10 @@ public sealed class MessageIngressStateMachine : IDisposable
     public OperationStatus CompleteEndOfInput()
     {
         ObjectDisposedException.ThrowIf(_isDisposed, this);
+        ThrowIfCalledFromSinkCallback("Message ingress cannot be completed from a sink callback.");
         if (_isConsuming)
         {
-            _isFaulted |= _isEvaluatingPolicy;
+            MarkReentry();
             throw new InvalidOperationException("Message ingress cannot be completed from a sink callback.");
         }
 
@@ -199,6 +214,7 @@ public sealed class MessageIngressStateMachine : IDisposable
 
     public void Dispose()
     {
+        ThrowIfCalledFromSinkCallback("Message ingress cannot be disposed from a sink callback.");
         if (_isDisposed)
         {
             return;
@@ -206,7 +222,7 @@ public sealed class MessageIngressStateMachine : IDisposable
 
         if (_isConsuming)
         {
-            _isFaulted |= _isEvaluatingPolicy;
+            MarkReentry();
             throw new InvalidOperationException("Message ingress cannot be disposed from a sink callback.");
         }
 
@@ -303,9 +319,10 @@ public sealed class MessageIngressStateMachine : IDisposable
         var payload = source[..acceptedLength];
         var status = validator.Consume(payload, out bytesConsumed);
 
-        if (bytesConsumed > 0)
+        if (bytesConsumed > 0 && NotifyPayload(payload[..bytesConsumed]) != OperationStatus.Done)
         {
-            NotifyPayload(payload[..bytesConsumed]);
+            AbortFrameAndNotify();
+            return OperationStatus.InvalidData;
         }
 
         if (status == OperationStatus.NeedMoreData)
@@ -329,10 +346,7 @@ public sealed class MessageIngressStateMachine : IDisposable
             return status;
         }
 
-        validator.Dispose();
-        _payloadValidator = null;
-        _isFaulted = true;
-        NotifyCompleted(new MessageIngressResult(MessageIngressCompletion.FrameAborted, null));
+        AbortFrameAndNotify();
         return OperationStatus.InvalidData;
     }
 
@@ -386,6 +400,7 @@ public sealed class MessageIngressStateMachine : IDisposable
     {
         try
         {
+            _isCallingSink = true;
             _sink.OnMessageStarted(header);
         }
         catch
@@ -393,18 +408,27 @@ public sealed class MessageIngressStateMachine : IDisposable
             Fault();
             throw;
         }
+        finally
+        {
+            CompleteSinkCallback();
+        }
     }
 
-    private void NotifyPayload(ReadOnlySpan<byte> payload)
+    private OperationStatus NotifyPayload(ReadOnlySpan<byte> payload)
     {
         try
         {
-            _sink.OnProvisionalPayload(payload);
+            _isCallingSink = true;
+            return _sink.OnProvisionalPayload(payload);
         }
         catch
         {
             Fault();
             throw;
+        }
+        finally
+        {
+            CompleteSinkCallback();
         }
     }
 
@@ -412,12 +436,60 @@ public sealed class MessageIngressStateMachine : IDisposable
     {
         try
         {
+            _isCallingSink = true;
             _sink.OnMessageCompleted(result);
         }
         catch
         {
             Fault();
             throw;
+        }
+        finally
+        {
+            CompleteSinkCallback();
+        }
+    }
+
+    private void AbortFrameAndNotify()
+    {
+        _payloadValidator?.Dispose();
+        _payloadValidator = null;
+        _isFaulted = true;
+        NotifyCompleted(new MessageIngressResult(MessageIngressCompletion.FrameAborted, null));
+    }
+
+    private void MarkReentry()
+    {
+        if (_isCallingSink)
+        {
+            _isFaulted = true;
+            _sinkCallbackReentryDetected = true;
+        }
+        else if (_isEvaluatingPolicy)
+        {
+            _isFaulted = true;
+        }
+    }
+
+    private void ThrowIfCalledFromSinkCallback(string message)
+    {
+        if (!_isCallingSink)
+        {
+            return;
+        }
+
+        MarkReentry();
+        throw new InvalidOperationException(message);
+    }
+
+    private void CompleteSinkCallback()
+    {
+        _isCallingSink = false;
+        if (_sinkCallbackReentryDetected)
+        {
+            Fault();
+            throw new InvalidOperationException(
+                "Message ingress reentrancy was caught inside a sink callback.");
         }
     }
 

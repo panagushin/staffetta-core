@@ -566,16 +566,49 @@ public sealed class MessageIngressStateMachineTests
         var frame = EncodeBasic("tx"u8, Payload, corruptChecksum: false);
         var sink = new ThrowingPayloadSink();
         using var ingress = CreateIngress(sink);
+        var bytesConsumed = -1;
 
-        Assert.ThrowsException<ExpectedSinkException>(() => ingress.Consume(frame, out _));
+        Assert.ThrowsException<ExpectedSinkException>(() => ingress.Consume(frame, out bytesConsumed));
+        Assert.AreEqual(frame.Length, bytesConsumed);
         Assert.IsTrue(ingress.IsFaulted);
         Assert.AreEqual(1, sink.PayloadCalls);
+        Assert.AreEqual(0, sink.CompletionCalls);
 
         Assert.AreEqual(
             OperationStatus.InvalidData,
             ingress.Consume(frame, out var retryConsumed));
         Assert.AreEqual(0, retryConsumed);
         Assert.AreEqual(1, sink.PayloadCalls);
+    }
+
+    [DataTestMethod]
+    [DataRow(OperationStatus.InvalidData)]
+    [DataRow(OperationStatus.NeedMoreData)]
+    [DataRow(OperationStatus.DestinationTooSmall)]
+    public void PayloadCallbackRejectionAbortsOnceAndNeverReplays(OperationStatus rejection)
+    {
+        byte[] payload = [1, 2, 3, 4, 5];
+        var rejectedFrame = EncodeBasic("tx"u8, payload, corruptChecksum: false);
+        var followingFrame = EncodeBasic("verack"u8, [], corruptChecksum: false);
+        var source = rejectedFrame.Concat(followingFrame).ToArray();
+        var sink = new RejectingPayloadSink(rejection);
+        using var ingress = CreateIngress(sink);
+
+        Assert.AreEqual(
+            OperationStatus.InvalidData,
+            ingress.Consume(source, out var bytesConsumed));
+        Assert.AreEqual(rejectedFrame.Length, bytesConsumed);
+        Assert.IsTrue(ingress.IsFaulted);
+        Assert.AreEqual(1, sink.PayloadCalls);
+        Assert.AreEqual(1, sink.AbortCalls);
+        Assert.AreEqual(0, sink.CommitCalls);
+
+        Assert.AreEqual(
+            OperationStatus.InvalidData,
+            ingress.Consume(source.AsSpan(bytesConsumed), out var retryConsumed));
+        Assert.AreEqual(0, retryConsumed);
+        Assert.AreEqual(1, sink.PayloadCalls);
+        Assert.AreEqual(1, sink.AbortCalls);
     }
 
     [TestMethod]
@@ -592,19 +625,43 @@ public sealed class MessageIngressStateMachineTests
     }
 
     [TestMethod]
-    public void SinkCanCatchRejectedReentryWithoutPoisoningOuterConsume()
+    public void CaughtStartedCallbackReentryFaultsBeforePayloadOrCompletion()
     {
         var frame = EncodeBasic("verack"u8, [], corruptChecksum: false);
         var sink = new CatchingReentrantSink();
         using var ingress = CreateIngress(sink);
         sink.Ingress = ingress;
+        var bytesConsumed = -1;
 
-        Assert.AreEqual(OperationStatus.Done, ingress.Consume(frame, out var bytesConsumed));
+        Assert.ThrowsException<InvalidOperationException>(() => ingress.Consume(frame, out bytesConsumed));
 
         Assert.AreEqual(frame.Length, bytesConsumed);
-        Assert.IsFalse(ingress.IsFaulted);
+        Assert.IsTrue(ingress.IsFaulted);
         Assert.AreEqual(1, sink.StartCalls);
-        Assert.AreEqual(1, sink.CompletionCalls);
+        Assert.AreEqual(0, sink.CompletionCalls);
+        Assert.AreEqual(OperationStatus.InvalidData, ingress.Consume(frame, out var retryConsumed));
+        Assert.AreEqual(0, retryConsumed);
+    }
+
+    [TestMethod]
+    public void CaughtPayloadCallbackReentryFaultsBeforeCompletionAndCountsAcceptedBytes()
+    {
+        byte[] payload = [6, 7, 8];
+        var frame = EncodeBasic("tx"u8, payload, corruptChecksum: false);
+        var sink = new CatchingPayloadReentrantSink();
+        using var ingress = CreateIngress(sink);
+        sink.Ingress = ingress;
+        var bytesConsumed = -1;
+
+        Assert.ThrowsException<InvalidOperationException>(() => ingress.Consume(frame, out bytesConsumed));
+
+        Assert.AreEqual(frame.Length, bytesConsumed);
+        Assert.IsTrue(ingress.IsFaulted);
+        Assert.AreEqual(1, sink.StartCalls);
+        Assert.AreEqual(1, sink.PayloadCalls);
+        Assert.AreEqual(0, sink.CompletionCalls);
+        Assert.AreEqual(OperationStatus.InvalidData, ingress.Consume(frame, out var retryConsumed));
+        Assert.AreEqual(0, retryConsumed);
     }
 
     [TestMethod]
@@ -625,6 +682,35 @@ public sealed class MessageIngressStateMachineTests
         Assert.IsTrue(ingress.IsFaulted);
         CollectionAssert.AreEqual(TruncatedPayloadEvents, sink.Events);
         Assert.IsNull(sink.Results.Single().PayloadDoubleSha256);
+    }
+
+    [TestMethod]
+    public void EndOfInputAbortRejectsAllCaughtNestedEntryPointsAndLeavesDisposeExternal()
+    {
+        var frame = EncodeBasic("tx"u8, Payload, corruptChecksum: false);
+        var prefixLength = MessageHeaderCodec.BasicHeaderLength + 5;
+        var sink = new CatchingAbortReentrantSink();
+        var ingress = CreateIngress(sink);
+        sink.Ingress = ingress;
+
+        Assert.AreEqual(
+            OperationStatus.NeedMoreData,
+            ingress.Consume(frame.AsSpan(0, prefixLength), out var bytesConsumed));
+        Assert.AreEqual(prefixLength, bytesConsumed);
+
+        Assert.ThrowsException<InvalidOperationException>(() => ingress.CompleteEndOfInput());
+        Assert.IsTrue(ingress.IsCompleted);
+        Assert.IsTrue(ingress.IsFaulted);
+        Assert.AreEqual(1, sink.AbortCalls);
+        Assert.AreEqual(1, sink.NestedConsumeExceptions);
+        Assert.AreEqual(1, sink.NestedCompleteExceptions);
+        Assert.AreEqual(1, sink.NestedDisposeExceptions);
+
+        Assert.AreEqual(OperationStatus.InvalidData, ingress.Consume([], out var retryConsumed));
+        Assert.AreEqual(0, retryConsumed);
+        ingress.Dispose();
+        ingress.Dispose();
+        Assert.ThrowsException<ObjectDisposedException>(() => ingress.Consume([], out _));
     }
 
     [TestMethod]
@@ -842,7 +928,7 @@ public sealed class MessageIngressStateMachineTests
             Events.Add($"start:{System.Text.Encoding.ASCII.GetString(command[..bytesWritten])}");
         }
 
-        public void OnProvisionalPayload(ReadOnlySpan<byte> payload)
+        public OperationStatus OnProvisionalPayload(ReadOnlySpan<byte> payload)
         {
             foreach (var value in payload)
             {
@@ -850,6 +936,7 @@ public sealed class MessageIngressStateMachineTests
             }
 
             Events.Add($"payload:{payload.Length}");
+            return OperationStatus.Done;
         }
 
         public void OnMessageCompleted(in MessageIngressResult result)
@@ -863,11 +950,13 @@ public sealed class MessageIngressStateMachineTests
     {
         public int PayloadCalls { get; private set; }
 
+        public int CompletionCalls { get; private set; }
+
         public void OnMessageStarted(in MessageHeader header)
         {
         }
 
-        public void OnProvisionalPayload(ReadOnlySpan<byte> payload)
+        public OperationStatus OnProvisionalPayload(ReadOnlySpan<byte> payload)
         {
             PayloadCalls++;
             throw new ExpectedSinkException();
@@ -875,7 +964,38 @@ public sealed class MessageIngressStateMachineTests
 
         public void OnMessageCompleted(in MessageIngressResult result)
         {
-            Assert.Fail("Completion must not be delivered after a payload callback exception.");
+            CompletionCalls++;
+        }
+    }
+
+    private sealed class RejectingPayloadSink(OperationStatus rejection) : IMessageIngressSink
+    {
+        public int PayloadCalls { get; private set; }
+
+        public int AbortCalls { get; private set; }
+
+        public int CommitCalls { get; private set; }
+
+        public void OnMessageStarted(in MessageHeader header)
+        {
+        }
+
+        public OperationStatus OnProvisionalPayload(ReadOnlySpan<byte> payload)
+        {
+            PayloadCalls++;
+            return rejection;
+        }
+
+        public void OnMessageCompleted(in MessageIngressResult result)
+        {
+            if (result.Completion == MessageIngressCompletion.FrameAborted)
+            {
+                AbortCalls++;
+            }
+            else
+            {
+                CommitCalls++;
+            }
         }
     }
 
@@ -891,9 +1011,7 @@ public sealed class MessageIngressStateMachineTests
             Ingress!.Consume([], out _);
         }
 
-        public void OnProvisionalPayload(ReadOnlySpan<byte> payload)
-        {
-        }
+        public OperationStatus OnProvisionalPayload(ReadOnlySpan<byte> payload) => OperationStatus.Done;
 
         public void OnMessageCompleted(in MessageIngressResult result)
         {
@@ -912,9 +1030,7 @@ public sealed class MessageIngressStateMachineTests
             Ingress!.Dispose();
         }
 
-        public void OnProvisionalPayload(ReadOnlySpan<byte> payload)
-        {
-        }
+        public OperationStatus OnProvisionalPayload(ReadOnlySpan<byte> payload) => OperationStatus.Done;
 
         public void OnMessageCompleted(in MessageIngressResult result)
         {
@@ -941,13 +1057,101 @@ public sealed class MessageIngressStateMachineTests
             }
         }
 
-        public void OnProvisionalPayload(ReadOnlySpan<byte> payload)
+        public OperationStatus OnProvisionalPayload(ReadOnlySpan<byte> payload) => OperationStatus.Done;
+
+        public void OnMessageCompleted(in MessageIngressResult result)
         {
+            CompletionCalls++;
+        }
+    }
+
+    private sealed class CatchingPayloadReentrantSink : IMessageIngressSink
+    {
+        public MessageIngressStateMachine? Ingress { get; set; }
+
+        public int StartCalls { get; private set; }
+
+        public int PayloadCalls { get; private set; }
+
+        public int CompletionCalls { get; private set; }
+
+        public void OnMessageStarted(in MessageHeader header)
+        {
+            StartCalls++;
+        }
+
+        public OperationStatus OnProvisionalPayload(ReadOnlySpan<byte> payload)
+        {
+            PayloadCalls++;
+            try
+            {
+                Ingress!.Consume([], out _);
+            }
+            catch (InvalidOperationException)
+            {
+            }
+
+            return OperationStatus.Done;
         }
 
         public void OnMessageCompleted(in MessageIngressResult result)
         {
             CompletionCalls++;
+        }
+    }
+
+    private sealed class CatchingAbortReentrantSink : IMessageIngressSink
+    {
+        public MessageIngressStateMachine? Ingress { get; set; }
+
+        public int AbortCalls { get; private set; }
+
+        public int NestedConsumeExceptions { get; private set; }
+
+        public int NestedCompleteExceptions { get; private set; }
+
+        public int NestedDisposeExceptions { get; private set; }
+
+        public void OnMessageStarted(in MessageHeader header)
+        {
+        }
+
+        public OperationStatus OnProvisionalPayload(ReadOnlySpan<byte> payload) => OperationStatus.Done;
+
+        public void OnMessageCompleted(in MessageIngressResult result)
+        {
+            if (result.Completion != MessageIngressCompletion.FrameAborted)
+            {
+                return;
+            }
+
+            AbortCalls++;
+            try
+            {
+                Ingress!.Consume([], out _);
+            }
+            catch (InvalidOperationException)
+            {
+                NestedConsumeExceptions++;
+            }
+
+            try
+            {
+                Ingress!.CompleteEndOfInput();
+            }
+            catch (InvalidOperationException)
+            {
+                NestedCompleteExceptions++;
+            }
+
+            try
+            {
+                Ingress!.Dispose();
+            }
+            catch (InvalidOperationException)
+            {
+                NestedDisposeExceptions++;
+            }
         }
     }
 
@@ -966,10 +1170,11 @@ public sealed class MessageIngressStateMachineTests
             StartCalls++;
         }
 
-        public void OnProvisionalPayload(ReadOnlySpan<byte> payload)
+        public OperationStatus OnProvisionalPayload(ReadOnlySpan<byte> payload)
         {
             PayloadCalls++;
             PayloadBytes += (ulong)payload.Length;
+            return OperationStatus.Done;
         }
 
         public void OnMessageCompleted(in MessageIngressResult result)

@@ -111,7 +111,7 @@ internal sealed class BsvHandshakeFrameProcessor : IDisposable
         }
     }
 
-    internal void OnProvisionalPayload(ReadOnlySpan<byte> payload)
+    internal OperationStatus OnProvisionalPayload(ReadOnlySpan<byte> payload)
     {
         switch (_stagedCommand)
         {
@@ -127,6 +127,8 @@ internal sealed class BsvHandshakeFrameProcessor : IDisposable
                 _protoconfParser.Consume(payload);
                 break;
         }
+
+        return OperationStatus.Done;
     }
 
     internal void OnMessageCompleted(in MessageIngressResult result)
