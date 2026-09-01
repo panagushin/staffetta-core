@@ -20,11 +20,10 @@ internal sealed class BsvPeerStreamTransportPump : IAsyncDisposable
     private readonly Stream _stream;
     private readonly BsvPeerSessionIngressAdapter _session;
     private readonly BsvPeerLocalHandshakeConfiguration _localHandshake;
-    private readonly IBsvTransactionPayloadSourceProvider _transactionSources;
     private readonly IBsvPeerSessionFactSink _factSink;
     private readonly BsvPeerStreamTransportOptions _options;
     private readonly BsvPeerStreamIngressDriver _ingress;
-    private readonly byte[] _transactionBuffer;
+    private readonly BsvPeerStreamEgressDriver _egress;
     private readonly BsvHandshakeOutput[] _handshakeOutputs =
         new BsvHandshakeOutput[BsvHandshakeStateMachine.MaximumOutputCount];
     private readonly BsvTransactionBroadcastOutput[] _broadcastOutputs =
@@ -32,16 +31,12 @@ internal sealed class BsvPeerStreamTransportPump : IAsyncDisposable
     private readonly BsvTransactionFetchOutput[] _fetchOutputs =
         new BsvTransactionFetchOutput[BsvTransactionFetchStateMachine.MaximumOutputCount];
 
-    private IBsvTransactionPayloadSource? _transactionSource;
     private int _handshakeOutputIndex;
     private int _handshakeOutputCount;
     private int _broadcastOutputIndex;
     private int _broadcastOutputCount;
     private int _fetchOutputIndex;
     private int _fetchOutputCount;
-    private ulong _transactionLength;
-    private ulong _transactionBytesRead;
-    private bool _transactionPayloadEnded;
     private bool _isStepping;
     private bool _dependencyReentryDetected;
     private bool _deferReentryUntilCommittedFactsDrain;
@@ -70,11 +65,9 @@ internal sealed class BsvPeerStreamTransportPump : IAsyncDisposable
 
         _stream = stream;
         _localHandshake = localHandshake ?? throw new ArgumentNullException(nameof(localHandshake));
-        _transactionSources = transactionSources ??
-            throw new ArgumentNullException(nameof(transactionSources));
+        ArgumentNullException.ThrowIfNull(transactionSources);
         _factSink = factSink ?? throw new ArgumentNullException(nameof(factSink));
         _options = options ?? new BsvPeerStreamTransportOptions();
-        _transactionBuffer = new byte[_options.TransactionBufferLength];
         _session = new BsvPeerSessionIngressAdapter(
             expectedNetworkMagic,
             maximumInboundPayloadLength,
@@ -84,6 +77,11 @@ internal sealed class BsvPeerStreamTransportPump : IAsyncDisposable
             _stream,
             _session,
             _options.ReadBufferLength);
+        _egress = new BsvPeerStreamEgressDriver(
+            _stream,
+            transactionSources,
+            _options.TransactionBufferLength,
+            _options.MaximumWriteLength);
     }
 
     internal bool HasLocalWork =>
@@ -95,7 +93,7 @@ internal sealed class BsvPeerStreamTransportPump : IAsyncDisposable
             _session.HasPendingOutputs ||
             _session.PendingHandshakeEgressIntentCount != 0 ||
             _session.EgressState != BsvPeerSessionEgressState.Idle ||
-            _transactionSource is not null);
+            _egress.HasTransactionSource);
 
     internal BsvHandshakeState HandshakeState => _session.HandshakeState;
 
@@ -185,7 +183,7 @@ internal sealed class BsvPeerStreamTransportPump : IAsyncDisposable
                     return await WritePendingSegmentAsync(pending, cancellationToken).ConfigureAwait(false);
                 }
 
-                if (_transactionSource is not null && !_transactionPayloadEnded)
+                if (_egress.HasTransactionSource && !_egress.TransactionPayloadEnded)
                 {
                     return await ReadTransactionChunkAsync(cancellationToken).ConfigureAwait(false);
                 }
@@ -278,7 +276,7 @@ internal sealed class BsvPeerStreamTransportPump : IAsyncDisposable
         !_session.HasPendingOutputs &&
         _session.PendingHandshakeEgressIntentCount == 0 &&
         _session.EgressState == BsvPeerSessionEgressState.Idle &&
-        _transactionSource is null;
+        !_egress.HasTransactionSource;
 
     private bool TryStageOutputs()
     {
@@ -427,10 +425,10 @@ internal sealed class BsvPeerStreamTransportPump : IAsyncDisposable
 
         if (output.Kind == BsvTransactionBroadcastOutputKind.SendTransaction)
         {
-            IBsvTransactionPayloadSource? source;
+            bool hasSource;
             try
             {
-                source = await _transactionSources.OpenAsync(
+                hasSource = await _egress.OpenTransactionSourceAsync(
                     output.TransactionId,
                     cancellationToken).ConfigureAwait(false);
             }
@@ -447,14 +445,13 @@ internal sealed class BsvPeerStreamTransportPump : IAsyncDisposable
                     BsvPeerTransportTerminalReason.TransactionSourceFailure).ConfigureAwait(false);
             }
 
-            if (source is null)
+            if (!hasSource)
             {
                 return await TerminateAsync(
                     BsvPeerTransportStepKind.Faulted,
                     BsvPeerTransportTerminalReason.TransactionSourceUnavailable).ConfigureAwait(false);
             }
 
-            _transactionSource = source;
             if (_dependencyReentryDetected)
             {
                 return await TerminateForReentryAsync().ConfigureAwait(false);
@@ -463,7 +460,7 @@ internal sealed class BsvPeerStreamTransportPump : IAsyncDisposable
             Hash256 sourceTransactionId;
             try
             {
-                sourceTransactionId = source.TransactionId;
+                sourceTransactionId = _egress.SnapshotTransactionId();
             }
             catch
             {
@@ -480,7 +477,7 @@ internal sealed class BsvPeerStreamTransportPump : IAsyncDisposable
             ulong sourceLength;
             try
             {
-                sourceLength = source.Length;
+                sourceLength = _egress.SnapshotTransactionLength();
             }
             catch
             {
@@ -494,9 +491,6 @@ internal sealed class BsvPeerStreamTransportPump : IAsyncDisposable
                 return await TerminateForReentryAsync().ConfigureAwait(false);
             }
 
-            _transactionLength = sourceLength;
-            _transactionBytesRead = 0;
-            _transactionPayloadEnded = false;
             if (sourceTransactionId != output.TransactionId ||
                 _session.PlanTransactionEgress(output, sourceLength, sourceTransactionId) !=
                     OperationStatus.Done)
@@ -533,10 +527,10 @@ internal sealed class BsvPeerStreamTransportPump : IAsyncDisposable
         MessageFrameWriteSegment pending,
         CancellationToken cancellationToken)
     {
-        var bytesToWrite = Math.Min(pending.Length, _options.MaximumWriteLength);
+        BsvPeerStreamPendingWrite write;
         try
         {
-            await _stream.WriteAsync(pending.Memory[..bytesToWrite], cancellationToken)
+            write = await _egress.WritePendingPrefixAsync(pending, cancellationToken)
                 .ConfigureAwait(false);
             if (_dependencyReentryDetected)
             {
@@ -556,11 +550,12 @@ internal sealed class BsvPeerStreamTransportPump : IAsyncDisposable
                 BsvPeerTransportTerminalReason.TransportWriteFailure).ConfigureAwait(false);
         }
 
-        if (_session.AcknowledgeEgress(pending, bytesToWrite) != OperationStatus.Done)
+        if (BsvPeerStreamEgressDriver.AcknowledgeWrittenPrefix(_session, write) !=
+            OperationStatus.Done)
         {
             return await TerminateAsync(
                 BsvPeerTransportStepKind.Faulted,
-                _transactionSource is null
+                !_egress.HasTransactionSource
                     ? BsvPeerTransportTerminalReason.ProtocolViolation
                     : BsvPeerTransportTerminalReason.TransactionHashMismatch).ConfigureAwait(false);
         }
@@ -571,28 +566,10 @@ internal sealed class BsvPeerStreamTransportPump : IAsyncDisposable
     private async ValueTask<BsvPeerTransportStepResult> ReadTransactionChunkAsync(
         CancellationToken cancellationToken)
     {
-        var source = _transactionSource!;
-        var remaining = _transactionLength - _transactionBytesRead;
-        if (remaining == 0)
-        {
-            _transactionPayloadEnded = true;
-            if (_session.EndTransactionEgressPayload() != OperationStatus.Done)
-            {
-                return await TerminateAsync(
-                    BsvPeerTransportStepKind.Faulted,
-                    BsvPeerTransportTerminalReason.TransactionSourceContractViolation).ConfigureAwait(false);
-            }
-
-            return BsvPeerTransportStepResult.Progress;
-        }
-
-        var length = (int)Math.Min((ulong)_transactionBuffer.Length, remaining);
-        int bytesRead;
+        BsvPeerStreamTransactionRead read;
         try
         {
-            bytesRead = await source.ReadAsync(
-                _transactionBuffer.AsMemory(0, length),
-                cancellationToken).ConfigureAwait(false);
+            read = await _egress.ReadTransactionChunkAsync(cancellationToken).ConfigureAwait(false);
             if (_dependencyReentryDetected)
             {
                 return await TerminateForReentryAsync().ConfigureAwait(false);
@@ -611,16 +588,10 @@ internal sealed class BsvPeerStreamTransportPump : IAsyncDisposable
                 BsvPeerTransportTerminalReason.TransactionSourceFailure).ConfigureAwait(false);
         }
 
-        if (bytesRead <= 0 || bytesRead > length)
-        {
-            return await TerminateAsync(
-                BsvPeerTransportStepKind.Faulted,
-                BsvPeerTransportTerminalReason.TransactionSourceContractViolation).ConfigureAwait(false);
-        }
-
-        _transactionBytesRead += (ulong)bytesRead;
-        if (_session.ProvideTransactionEgressChunk(
-                _transactionBuffer.AsMemory(0, bytesRead)) != OperationStatus.Done)
+        var status = read.IsEndOfPayload
+            ? _egress.EndTransactionPayload(_session)
+            : _egress.AcceptTransactionRead(_session, read);
+        if (status != OperationStatus.Done)
         {
             return await TerminateAsync(
                 BsvPeerTransportStepKind.Faulted,
@@ -632,8 +603,8 @@ internal sealed class BsvPeerStreamTransportPump : IAsyncDisposable
 
     private async ValueTask<BsvPeerTransportStepResult> CommitEgressAsync()
     {
-        var wasTransaction = _transactionSource is not null;
-        var status = _session.CommitEgressCompletion();
+        var wasTransaction = _egress.HasTransactionSource;
+        var status = await _egress.CommitAsync(_session).ConfigureAwait(false);
         if (status == OperationStatus.DestinationTooSmall)
         {
             return TryStageOutputs()
@@ -654,7 +625,6 @@ internal sealed class BsvPeerStreamTransportPump : IAsyncDisposable
 
         if (wasTransaction)
         {
-            await ReleaseTransactionSourceAsync().ConfigureAwait(false);
             if (_dependencyReentryDetected)
             {
                 _dependencyReentryDetected = false;
@@ -815,7 +785,7 @@ internal sealed class BsvPeerStreamTransportPump : IAsyncDisposable
         }
 
         _resourcesReleased = true;
-        await ReleaseTransactionSourceAsync().ConfigureAwait(false);
+        await _egress.ReleaseTransactionSourceAsync().ConfigureAwait(false);
         try
         {
             _session.Dispose();
@@ -834,26 +804,6 @@ internal sealed class BsvPeerStreamTransportPump : IAsyncDisposable
             catch
             {
                 // Terminal cleanup preserves the primary transport result.
-            }
-        }
-    }
-
-    private async ValueTask ReleaseTransactionSourceAsync()
-    {
-        var source = _transactionSource;
-        _transactionSource = null;
-        _transactionLength = 0;
-        _transactionBytesRead = 0;
-        _transactionPayloadEnded = false;
-        if (source is not null)
-        {
-            try
-            {
-                await source.DisposeAsync().ConfigureAwait(false);
-            }
-            catch
-            {
-                // Source cleanup never changes an already established transport fact.
             }
         }
     }
