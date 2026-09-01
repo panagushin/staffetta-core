@@ -1,6 +1,8 @@
 <Solution>
   <Project Path="spikes/Staffetta.Bsv.LiveProbe/Staffetta.Bsv.LiveProbe.csproj" />
+  <Project Path="src/Staffetta.Bsv.Cli/Staffetta.Bsv.Cli.csproj" />
   <Project Path="src/Staffetta.Core/Staffetta.Core.csproj" />
   <Project Path="tests/Staffetta.Bsv.LiveProbe.Tests/Staffetta.Bsv.LiveProbe.Tests.csproj" />
+  <Project Path="tests/Staffetta.Bsv.Cli.Tests/Staffetta.Bsv.Cli.Tests.csproj" />
   <Project Path="tests/Staffetta.Core.Tests/Staffetta.Core.Tests.csproj" />
 </Solution>

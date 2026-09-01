@@ -94,6 +94,21 @@ internal sealed class BsvPeerStreamTransportPump : IAsyncDisposable
 
     internal BsvTransactionFetchState FetchState => _session.FetchState;
 
+    internal bool TryGetReadyPeerSnapshot(out BsvPeerReadySnapshot snapshot)
+    {
+        snapshot = default;
+        if (_session.HandshakeState != BsvHandshakeState.Ready || !_session.HasPeerVersion)
+        {
+            return false;
+        }
+
+        snapshot = new BsvPeerReadySnapshot(
+            _session.PeerProtocolVersion,
+            _session.EffectivePeerMaximumReceivePayloadLength,
+            _session.HasPeerProtoconf);
+        return true;
+    }
+
     internal BsvPeerTransportStepResult TerminalResult => _terminalResult;
 
     internal bool IsTerminal => _isTerminal;

@@ -107,6 +107,12 @@ internal sealed class BsvPeerStreamTransportActor : IAsyncDisposable
     internal BsvPeerTransportCommandSubmission QueueFetch(Hash256 transactionId) =>
         Queue(BsvPeerTransportCommandKind.Fetch, transactionId);
 
+    internal BsvHandshakeTerminalReason HandshakeTerminalReason =>
+        _pump.HandshakeTerminalReason;
+
+    internal bool TryGetReadyPeerSnapshot(out BsvPeerReadySnapshot snapshot) =>
+        _pump.TryGetReadyPeerSnapshot(out snapshot);
+
     internal Task<BsvPeerTransportActorCompletion> RunAsync()
     {
         lock (_lifecycleGate)

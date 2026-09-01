@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>Staffetta.Bsv.Cli</AssemblyName>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../Staffetta.Core/Staffetta.Core.csproj" />
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleToAttribute">
+      <_Parameter1>Staffetta.Bsv.Cli.Tests</_Parameter1>
+    </AssemblyAttribute>
+  </ItemGroup>
+</Project>
