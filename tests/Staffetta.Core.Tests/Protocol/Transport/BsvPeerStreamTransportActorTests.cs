@@ -116,6 +116,48 @@ public sealed class BsvPeerStreamTransportActorTests
     }
 
     [TestMethod]
+    public async Task EmptyQueueKeepsOneLogicalWaitAcrossPeerWakeupsThenAppliesOneCommand()
+    {
+        var stream = new ActorDuplexStream(CreateHandshakeFrames());
+        var facts = new CountingFactSink();
+        await using var actor = CreateActor(stream, facts);
+        var run = actor.RunAsync();
+        await WaitUntilAsync(() => facts.BecameReadyCount == 1 && stream.PendingReadCount == 1);
+        var cancellationsBefore = stream.ReadCancellationCount;
+
+        for (var index = 0; index < 4; index++)
+        {
+            stream.AppendInput(
+                BsvPeerStreamTransportTestInfrastructure.EncodeBasic(
+                    "ping"u8,
+                    BitConverter.GetBytes((ulong)(index + 1))));
+            var expectedPongs = index + 1;
+            await WaitUntilAsync(() =>
+                stream.PendingReadCount == 1 &&
+                ReadCommands(stream.WrittenBytes).Count(
+                    static command => command == "pong") == expectedPongs);
+        }
+
+        var transactionId = Hash256.DoubleSha256("after-read-wakeups"u8);
+        var submission = actor.QueueBroadcast(transactionId);
+        Assert.AreEqual(BsvPeerTransportCommandQueueStatus.Accepted, submission.Status);
+        Assert.AreEqual(
+            BsvPeerTransportCommandApplicationKind.PumpApplied,
+            (await submission.Application!).Kind);
+        await WaitUntilAsync(() => facts.AnnouncedCount == 1 && stream.PendingReadCount == 1);
+
+        var commands = ReadCommands(stream.WrittenBytes);
+        Assert.AreEqual(4, commands.Count(static command => command == "pong"));
+        Assert.AreEqual(1, commands.Count(static command => command == "inv"));
+        Assert.AreEqual(4, stream.CompletedInjectedReadCount);
+        Assert.AreEqual(cancellationsBefore, stream.ReadCancellationCount);
+        Assert.AreEqual(1, facts.AnnouncedCount);
+
+        await actor.StopAsync();
+        Assert.AreEqual(BsvPeerTransportActorCompletionKind.Stopped, (await run).Kind);
+    }
+
+    [TestMethod]
     public async Task PartialFrameHoldsEightCommandsAndRejectsNinth()
     {
         var stream = new ActorDuplexStream(CreateHandshakeFrames());

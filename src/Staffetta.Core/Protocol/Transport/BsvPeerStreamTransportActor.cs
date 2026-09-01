@@ -221,6 +221,7 @@ internal sealed class BsvPeerStreamTransportActor : IAsyncDisposable
         var previousActor = ExecutingActor.Value;
         ExecutingActor.Value = this;
         BsvPeerStreamReadOperation? read = null;
+        Task<bool>? commandAvailable = null;
         try
         {
             if (_pump.StartHandshake() != OperationStatus.Done)
@@ -296,6 +297,7 @@ internal sealed class BsvPeerStreamTransportActor : IAsyncDisposable
 
                 if (_pump.CanApplyActorCommand && _commands.Reader.TryRead(out var command))
                 {
+                    commandAvailable = null;
                     var status = command.Kind == BsvPeerTransportCommandKind.Broadcast
                         ? _pump.StartBroadcast(command.TransactionId)
                         : _pump.StartFetch(command.TransactionId);
@@ -313,7 +315,7 @@ internal sealed class BsvPeerStreamTransportActor : IAsyncDisposable
                     continue;
                 }
 
-                var commandAvailable = _commands.Reader.WaitToReadAsync().AsTask();
+                commandAvailable ??= _commands.Reader.WaitToReadAsync().AsTask();
                 await Task.WhenAny(
                     read.Value.Completion,
                     commandAvailable,
