@@ -23,7 +23,7 @@ internal sealed class BsvPeerStreamTransportPump : IAsyncDisposable
     private readonly IBsvTransactionPayloadSourceProvider _transactionSources;
     private readonly IBsvPeerSessionFactSink _factSink;
     private readonly BsvPeerStreamTransportOptions _options;
-    private readonly byte[] _readBuffer;
+    private readonly BsvPeerStreamIngressDriver _ingress;
     private readonly byte[] _transactionBuffer;
     private readonly BsvHandshakeOutput[] _handshakeOutputs =
         new BsvHandshakeOutput[BsvHandshakeStateMachine.MaximumOutputCount];
@@ -33,8 +33,6 @@ internal sealed class BsvPeerStreamTransportPump : IAsyncDisposable
         new BsvTransactionFetchOutput[BsvTransactionFetchStateMachine.MaximumOutputCount];
 
     private IBsvTransactionPayloadSource? _transactionSource;
-    private int _readOffset;
-    private int _readCount;
     private int _handshakeOutputIndex;
     private int _handshakeOutputCount;
     private int _broadcastOutputIndex;
@@ -44,7 +42,6 @@ internal sealed class BsvPeerStreamTransportPump : IAsyncDisposable
     private ulong _transactionLength;
     private ulong _transactionBytesRead;
     private bool _transactionPayloadEnded;
-    private bool _isIngressFramePartial;
     private bool _isStepping;
     private bool _dependencyReentryDetected;
     private bool _deferReentryUntilCommittedFactsDrain;
@@ -77,20 +74,23 @@ internal sealed class BsvPeerStreamTransportPump : IAsyncDisposable
             throw new ArgumentNullException(nameof(transactionSources));
         _factSink = factSink ?? throw new ArgumentNullException(nameof(factSink));
         _options = options ?? new BsvPeerStreamTransportOptions();
-        _readBuffer = new byte[_options.ReadBufferLength];
         _transactionBuffer = new byte[_options.TransactionBufferLength];
         _session = new BsvPeerSessionIngressAdapter(
             expectedNetworkMagic,
             maximumInboundPayloadLength,
             minimumPeerProtocolVersion,
             transactionSink ?? throw new ArgumentNullException(nameof(transactionSink)));
+        _ingress = new BsvPeerStreamIngressDriver(
+            _stream,
+            _session,
+            _options.ReadBufferLength);
     }
 
     internal bool HasLocalWork =>
         !_isTerminal &&
         (_deferReentryUntilCommittedFactsDrain ||
             _session.HandshakeState == BsvHandshakeState.Terminal ||
-            _readOffset != _readCount ||
+            _ingress.HasBufferedInput ||
             HasStagedOutputs ||
             _session.HasPendingOutputs ||
             _session.PendingHandshakeEgressIntentCount != 0 ||
@@ -232,7 +232,7 @@ internal sealed class BsvPeerStreamTransportPump : IAsyncDisposable
                     BsvPeerTransportTerminalReason.HandshakeTerminated).ConfigureAwait(false);
             }
 
-            if (_readOffset != _readCount)
+            if (_ingress.HasBufferedInput)
             {
                 return await ConsumeBufferedInputAsync().ConfigureAwait(false);
             }
@@ -272,8 +272,8 @@ internal sealed class BsvPeerStreamTransportPump : IAsyncDisposable
         !_isTerminal &&
         !_isDisposed &&
         !_deferReentryUntilCommittedFactsDrain &&
-        _readOffset == _readCount &&
-        !_isIngressFramePartial &&
+        !_ingress.HasBufferedInput &&
+        !_ingress.IsFramePartial &&
         !HasStagedOutputs &&
         !_session.HasPendingOutputs &&
         _session.PendingHandshakeEgressIntentCount == 0 &&
@@ -667,15 +667,13 @@ internal sealed class BsvPeerStreamTransportPump : IAsyncDisposable
 
     private async ValueTask<BsvPeerTransportStepResult> ConsumeBufferedInputAsync()
     {
-        while (_readOffset != _readCount)
+        while (_ingress.HasBufferedInput)
         {
             OperationStatus status;
             int consumed;
             try
             {
-                status = _session.Consume(
-                    _readBuffer.AsSpan(_readOffset, _readCount - _readOffset),
-                    out consumed);
+                status = _ingress.ConsumeBufferedInput(out consumed);
                 if (_dependencyReentryDetected)
                 {
                     return await TerminateForReentryAsync().ConfigureAwait(false);
@@ -688,27 +686,11 @@ internal sealed class BsvPeerStreamTransportPump : IAsyncDisposable
                     BsvPeerTransportTerminalReason.ProtocolViolation).ConfigureAwait(false);
             }
 
-            if (consumed < 0 || consumed > _readCount - _readOffset)
+            if (!_ingress.TryCommitConsume(status, consumed))
             {
                 return await TerminateAsync(
                     BsvPeerTransportStepKind.Faulted,
                     BsvPeerTransportTerminalReason.ProtocolViolation).ConfigureAwait(false);
-            }
-
-            _readOffset += consumed;
-            if (status == OperationStatus.NeedMoreData)
-            {
-                _isIngressFramePartial = true;
-            }
-            else if (status == OperationStatus.Done ||
-                (status == OperationStatus.DestinationTooSmall && consumed != 0))
-            {
-                _isIngressFramePartial = false;
-            }
-            if (_readOffset == _readCount)
-            {
-                _readOffset = 0;
-                _readCount = 0;
             }
 
             if (status == OperationStatus.InvalidData)
@@ -754,7 +736,7 @@ internal sealed class BsvPeerStreamTransportPump : IAsyncDisposable
         int bytesRead;
         try
         {
-            bytesRead = await _stream.ReadAsync(_readBuffer, cancellationToken).ConfigureAwait(false);
+            bytesRead = await _ingress.ReadAsync(cancellationToken).ConfigureAwait(false);
             if (_dependencyReentryDetected)
             {
                 return await TerminateForReentryAsync().ConfigureAwait(false);
@@ -773,7 +755,7 @@ internal sealed class BsvPeerStreamTransportPump : IAsyncDisposable
                 BsvPeerTransportTerminalReason.TransportReadFailure).ConfigureAwait(false);
         }
 
-        if (bytesRead < 0 || bytesRead > _readBuffer.Length)
+        if (bytesRead < 0)
         {
             return await TerminateAsync(
                 BsvPeerTransportStepKind.Faulted,
@@ -785,7 +767,7 @@ internal sealed class BsvPeerStreamTransportPump : IAsyncDisposable
             OperationStatus status;
             try
             {
-                status = _session.CompleteEndOfInput();
+                status = _ingress.CompleteEndOfInput();
             }
             catch
             {
@@ -801,8 +783,13 @@ internal sealed class BsvPeerStreamTransportPump : IAsyncDisposable
                     : BsvPeerTransportTerminalReason.TruncatedInput).ConfigureAwait(false);
         }
 
-        _readOffset = 0;
-        _readCount = bytesRead;
+        if (!_ingress.TryCommitRead(bytesRead))
+        {
+            return await TerminateAsync(
+                BsvPeerTransportStepKind.Faulted,
+                BsvPeerTransportTerminalReason.TransportReadFailure).ConfigureAwait(false);
+        }
+
         return BsvPeerTransportStepResult.Progress;
     }
 
