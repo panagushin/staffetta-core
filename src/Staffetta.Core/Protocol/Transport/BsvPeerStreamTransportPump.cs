@@ -25,6 +25,7 @@ internal sealed class BsvPeerStreamTransportPump : IAsyncDisposable
     private readonly BsvPeerStreamEgressDriver _egress;
     private readonly BsvPeerSessionOutputDispatcher _outputs;
     private bool _isStepping;
+    private bool _isStartingRead;
     private bool _dependencyReentryDetected;
     private bool _deferReentryUntilCommittedFactsDrain;
     private bool _isStarted;
@@ -75,6 +76,7 @@ internal sealed class BsvPeerStreamTransportPump : IAsyncDisposable
     internal bool HasLocalWork =>
         !_isTerminal &&
         (_deferReentryUntilCommittedFactsDrain ||
+            _dependencyReentryDetected ||
             _session.HandshakeState == BsvHandshakeState.Terminal ||
             _ingress.HasBufferedInput ||
             _outputs.HasStagedOutputs ||
@@ -93,6 +95,12 @@ internal sealed class BsvPeerStreamTransportPump : IAsyncDisposable
     internal BsvTransactionFetchState FetchState => _session.FetchState;
 
     internal BsvPeerTransportStepResult TerminalResult => _terminalResult;
+
+    internal bool IsTerminal => _isTerminal;
+
+    internal bool CanApplyActorCommand => CanStartRelayCommand();
+
+    internal bool IsFramePartial => _ingress.IsFramePartial;
 
     internal OperationStatus StartHandshake()
     {
@@ -124,7 +132,9 @@ internal sealed class BsvPeerStreamTransportPump : IAsyncDisposable
             return OperationStatus.InvalidData;
         }
 
-        return CanStartCommand() ? _session.StartBroadcast(transactionId) : OperationStatus.InvalidData;
+        return CanStartRelayCommand()
+            ? _session.StartBroadcast(transactionId)
+            : OperationStatus.InvalidData;
     }
 
     internal OperationStatus StartFetch(Hash256 transactionId)
@@ -135,7 +145,9 @@ internal sealed class BsvPeerStreamTransportPump : IAsyncDisposable
             return OperationStatus.InvalidData;
         }
 
-        return CanStartCommand() ? _session.StartFetch(transactionId) : OperationStatus.InvalidData;
+        return CanStartRelayCommand()
+            ? _session.StartFetch(transactionId)
+            : OperationStatus.InvalidData;
     }
 
     internal async ValueTask<BsvPeerTransportStepResult> StepAsync(
@@ -163,74 +175,234 @@ internal sealed class BsvPeerStreamTransportPump : IAsyncDisposable
         _isStepping = true;
         try
         {
-            if (_session.EgressState is BsvPeerSessionEgressState.Active)
+            var local = await DriveLocalAsync(cancellationToken).ConfigureAwait(false);
+            if (local.Kind == BsvPeerTransportDriveKind.Progress)
             {
-                var pending = _session.PendingEgressSegment;
-                if (!pending.IsEmpty)
-                {
-                    return await WritePendingSegmentAsync(pending, cancellationToken).ConfigureAwait(false);
-                }
-
-                if (_egress.HasTransactionSource && !_egress.TransactionPayloadEnded)
-                {
-                    return await ReadTransactionChunkAsync(cancellationToken).ConfigureAwait(false);
-                }
-
-                return await TerminateAsync(
-                    BsvPeerTransportStepKind.Faulted,
-                    BsvPeerTransportTerminalReason.TransactionSourceContractViolation).ConfigureAwait(false);
+                return local.StepResult;
             }
 
+            if (local.Kind == BsvPeerTransportDriveKind.Terminal)
+            {
+                return local.StepResult;
+            }
+
+            var read = BeginPeerReadCore(cancellationToken);
+            return await ApplyPeerReadCoreAsync(read, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            _isStepping = false;
+        }
+    }
+
+    internal async ValueTask<BsvPeerTransportDriveResult> StepLocalAsync(
+        CancellationToken cancellationToken = default)
+    {
+        ThrowIfDisposed();
+        if (_isStepping)
+        {
+            _dependencyReentryDetected = true;
+            throw new InvalidOperationException("Peer transport steps cannot overlap or re-enter.");
+        }
+
+        if (_isTerminal)
+        {
+            return BsvPeerTransportDriveResult.Terminal(_terminalResult);
+        }
+
+        if (!_isStarted)
+        {
+            var terminal = await TerminateAsync(
+                BsvPeerTransportStepKind.Faulted,
+                BsvPeerTransportTerminalReason.ProtocolViolation).ConfigureAwait(false);
+            return BsvPeerTransportDriveResult.Terminal(terminal);
+        }
+
+        _isStepping = true;
+        try
+        {
+            return await DriveLocalAsync(cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            _isStepping = false;
+        }
+    }
+
+    internal async ValueTask<bool> TryDrainCommittedFactAsync()
+    {
+        ThrowIfDisposed();
+        if (_isStepping || _isTerminal)
+        {
+            return false;
+        }
+
+        _isStepping = true;
+        try
+        {
             if (_session.EgressState == BsvPeerSessionEgressState.Complete)
             {
-                return await CommitEgressAsync().ConfigureAwait(false);
+                var committed = await CommitEgressAsync().ConfigureAwait(false);
+                return committed.Kind == BsvPeerTransportStepKind.Progress;
             }
 
-            if (_session.EgressState is BsvPeerSessionEgressState.Faulted or
-                BsvPeerSessionEgressState.Aborted or BsvPeerSessionEgressState.Disposed)
+            if (_session.EgressState != BsvPeerSessionEgressState.Idle)
             {
-                return await TerminateAsync(
-                    BsvPeerTransportStepKind.Faulted,
-                    BsvPeerTransportTerminalReason.ProtocolViolation).ConfigureAwait(false);
+                return false;
             }
 
             if (!_outputs.HasStagedOutputs &&
                 _session.HasPendingOutputs &&
                 !_outputs.TryStageOutputs())
             {
-                return await TerminateAsync(
+                await TerminateAsync(
                     BsvPeerTransportStepKind.Faulted,
                     BsvPeerTransportTerminalReason.ProtocolViolation).ConfigureAwait(false);
+                return false;
             }
 
-            if (_outputs.HasStagedOutputs)
+            if (!_outputs.HasStagedOutputs)
             {
-                return await ProcessNextOutputAsync(cancellationToken).ConfigureAwait(false);
+                return false;
             }
 
-            if (_deferReentryUntilCommittedFactsDrain && !_session.HasPendingOutputs)
+            var dispatch = _outputs.DispatchNext();
+            if (dispatch.Kind != BsvPeerSessionOutputDispatchKind.FactPending)
             {
-                return await TerminateForReentryAsync().ConfigureAwait(false);
+                return false;
             }
 
-            if (_session.HandshakeState == BsvHandshakeState.Terminal)
-            {
-                return await TerminateAsync(
-                    BsvPeerTransportStepKind.Faulted,
-                    BsvPeerTransportTerminalReason.HandshakeTerminated).ConfigureAwait(false);
-            }
-
-            if (_ingress.HasBufferedInput)
-            {
-                return await ConsumeBufferedInputAsync().ConfigureAwait(false);
-            }
-
-            return await ReadFromPeerAsync(cancellationToken).ConfigureAwait(false);
+            var result = await ProcessNextOutputAsync(CancellationToken.None).ConfigureAwait(false);
+            return result.Kind == BsvPeerTransportStepKind.Progress;
         }
         finally
         {
             _isStepping = false;
         }
+    }
+
+    internal BsvPeerStreamReadOperation BeginPeerRead(CancellationToken cancellationToken)
+    {
+        ThrowIfDisposed();
+        if (_isStepping)
+        {
+            throw new InvalidOperationException("The peer is not ready to begin a read.");
+        }
+
+        return BeginPeerReadCore(cancellationToken);
+    }
+
+    private BsvPeerStreamReadOperation BeginPeerReadCore(CancellationToken cancellationToken)
+    {
+        if (_isTerminal || _isStartingRead || _ingress.HasPendingRead ||
+            _ingress.HasBufferedInput)
+        {
+            throw new InvalidOperationException("The peer is not ready to begin a read.");
+        }
+
+        _isStartingRead = true;
+        try
+        {
+            return _ingress.BeginRead(cancellationToken);
+        }
+        finally
+        {
+            _isStartingRead = false;
+        }
+    }
+
+    internal async ValueTask<BsvPeerTransportStepResult> ApplyPeerReadAsync(
+        BsvPeerStreamReadOperation read,
+        CancellationToken cancellationToken)
+    {
+        ThrowIfDisposed();
+        if (_isStepping || !_ingress.IsPendingRead(read))
+        {
+            throw new InvalidOperationException("The peer read does not belong to this pump.");
+        }
+
+        _isStepping = true;
+        try
+        {
+            return await ApplyPeerReadCoreAsync(read, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            _isStepping = false;
+        }
+    }
+
+    private async ValueTask<BsvPeerTransportDriveResult> DriveLocalAsync(
+        CancellationToken cancellationToken)
+    {
+            if (_dependencyReentryDetected)
+            {
+                return ToDrive(await TerminateForReentryAsync().ConfigureAwait(false));
+            }
+
+            if (_session.EgressState is BsvPeerSessionEgressState.Active)
+            {
+                var pending = _session.PendingEgressSegment;
+                if (!pending.IsEmpty)
+                {
+                    return ToDrive(await WritePendingSegmentAsync(pending, cancellationToken).ConfigureAwait(false));
+                }
+
+                if (_egress.HasTransactionSource && !_egress.TransactionPayloadEnded)
+                {
+                    return ToDrive(await ReadTransactionChunkAsync(cancellationToken).ConfigureAwait(false));
+                }
+
+                return ToDrive(await TerminateAsync(
+                    BsvPeerTransportStepKind.Faulted,
+                    BsvPeerTransportTerminalReason.TransactionSourceContractViolation).ConfigureAwait(false));
+            }
+
+            if (_session.EgressState == BsvPeerSessionEgressState.Complete)
+            {
+                return ToDrive(await CommitEgressAsync().ConfigureAwait(false));
+            }
+
+            if (_session.EgressState is BsvPeerSessionEgressState.Faulted or
+                BsvPeerSessionEgressState.Aborted or BsvPeerSessionEgressState.Disposed)
+            {
+                return ToDrive(await TerminateAsync(
+                    BsvPeerTransportStepKind.Faulted,
+                    BsvPeerTransportTerminalReason.ProtocolViolation).ConfigureAwait(false));
+            }
+
+            if (!_outputs.HasStagedOutputs &&
+                _session.HasPendingOutputs &&
+                !_outputs.TryStageOutputs())
+            {
+                return ToDrive(await TerminateAsync(
+                    BsvPeerTransportStepKind.Faulted,
+                    BsvPeerTransportTerminalReason.ProtocolViolation).ConfigureAwait(false));
+            }
+
+            if (_outputs.HasStagedOutputs)
+            {
+                return ToDrive(await ProcessNextOutputAsync(cancellationToken).ConfigureAwait(false));
+            }
+
+            if (_deferReentryUntilCommittedFactsDrain && !_session.HasPendingOutputs)
+            {
+                return ToDrive(await TerminateForReentryAsync().ConfigureAwait(false));
+            }
+
+            if (_session.HandshakeState == BsvHandshakeState.Terminal)
+            {
+                return ToDrive(await TerminateAsync(
+                    BsvPeerTransportStepKind.Faulted,
+                    BsvPeerTransportTerminalReason.HandshakeTerminated).ConfigureAwait(false));
+            }
+
+            if (_ingress.HasBufferedInput)
+            {
+                return ToDrive(await ConsumeBufferedInputAsync().ConfigureAwait(false));
+            }
+
+            return BsvPeerTransportDriveResult.NeedsPeerRead;
     }
 
     public async ValueTask DisposeAsync()
@@ -252,6 +424,8 @@ internal sealed class BsvPeerStreamTransportPump : IAsyncDisposable
 
     private bool CanStartCommand() =>
         !_isStepping &&
+        !_isStartingRead &&
+        !_dependencyReentryDetected &&
         !_isTerminal &&
         !_isDisposed &&
         !_deferReentryUntilCommittedFactsDrain &&
@@ -262,6 +436,9 @@ internal sealed class BsvPeerStreamTransportPump : IAsyncDisposable
         _session.PendingHandshakeEgressIntentCount == 0 &&
         _session.EgressState == BsvPeerSessionEgressState.Idle &&
         !_egress.HasTransactionSource;
+
+    private bool CanStartRelayCommand() =>
+        _session.HandshakeState == BsvHandshakeState.Ready && CanStartCommand();
 
     private async ValueTask<BsvPeerTransportStepResult> ProcessNextOutputAsync(
         CancellationToken cancellationToken)
@@ -569,13 +746,14 @@ internal sealed class BsvPeerStreamTransportPump : IAsyncDisposable
         return BsvPeerTransportStepResult.Progress;
     }
 
-    private async ValueTask<BsvPeerTransportStepResult> ReadFromPeerAsync(
+    private async ValueTask<BsvPeerTransportStepResult> ApplyPeerReadCoreAsync(
+        BsvPeerStreamReadOperation read,
         CancellationToken cancellationToken)
     {
         int bytesRead;
         try
         {
-            bytesRead = await _ingress.ReadAsync(cancellationToken).ConfigureAwait(false);
+            bytesRead = await read.Completion.ConfigureAwait(false);
             if (_dependencyReentryDetected)
             {
                 return await TerminateForReentryAsync().ConfigureAwait(false);
@@ -583,12 +761,14 @@ internal sealed class BsvPeerStreamTransportPump : IAsyncDisposable
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
+            _ingress.TryAbandonRead(read);
             return await TerminateAsync(
                 BsvPeerTransportStepKind.Canceled,
                 BsvPeerTransportTerminalReason.Canceled).ConfigureAwait(false);
         }
         catch
         {
+            _ingress.TryAbandonRead(read);
             return await TerminateAsync(
                 BsvPeerTransportStepKind.Faulted,
                 BsvPeerTransportTerminalReason.TransportReadFailure).ConfigureAwait(false);
@@ -596,6 +776,7 @@ internal sealed class BsvPeerStreamTransportPump : IAsyncDisposable
 
         if (bytesRead < 0)
         {
+            _ingress.TryAbandonRead(read);
             return await TerminateAsync(
                 BsvPeerTransportStepKind.Faulted,
                 BsvPeerTransportTerminalReason.TransportReadFailure).ConfigureAwait(false);
@@ -603,6 +784,13 @@ internal sealed class BsvPeerStreamTransportPump : IAsyncDisposable
 
         if (bytesRead == 0)
         {
+            if (!_ingress.TryAbandonRead(read))
+            {
+                return await TerminateAsync(
+                    BsvPeerTransportStepKind.Faulted,
+                    BsvPeerTransportTerminalReason.TransportReadFailure).ConfigureAwait(false);
+            }
+
             OperationStatus status;
             try
             {
@@ -622,7 +810,7 @@ internal sealed class BsvPeerStreamTransportPump : IAsyncDisposable
                     : BsvPeerTransportTerminalReason.TruncatedInput).ConfigureAwait(false);
         }
 
-        if (!_ingress.TryCommitRead(bytesRead))
+        if (!_ingress.TryCommitRead(read, bytesRead))
         {
             return await TerminateAsync(
                 BsvPeerTransportStepKind.Faulted,
@@ -631,6 +819,11 @@ internal sealed class BsvPeerStreamTransportPump : IAsyncDisposable
 
         return BsvPeerTransportStepResult.Progress;
     }
+
+    private static BsvPeerTransportDriveResult ToDrive(BsvPeerTransportStepResult result) =>
+        result.Kind == BsvPeerTransportStepKind.Progress
+            ? BsvPeerTransportDriveResult.Progress
+            : BsvPeerTransportDriveResult.Terminal(result);
 
     private async ValueTask<BsvPeerTransportStepResult> TerminateAsync(
         BsvPeerTransportStepKind kind,
@@ -679,7 +872,7 @@ internal sealed class BsvPeerStreamTransportPump : IAsyncDisposable
 
     private bool RejectCommandReentry()
     {
-        if (!_isStepping)
+        if (!_isStepping && !_isStartingRead)
         {
             return false;
         }

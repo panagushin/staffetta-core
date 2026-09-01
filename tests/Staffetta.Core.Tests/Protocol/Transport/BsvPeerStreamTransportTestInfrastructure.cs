@@ -137,7 +137,7 @@ internal static class BsvPeerStreamTransportTestInfrastructure
         return EncodeBasic(command, payload);
     }
 
-    private static byte[] CreateVersionPayload()
+    internal static byte[] CreateVersionPayload()
     {
         Assert.IsTrue(NetworkAddress.TryCreateIpv4(1, [192, 0, 2, 10], 8333, out var receiving));
         Assert.IsTrue(NetworkAddress.TryCreateIpv4(1, [192, 0, 2, 11], 8333, out var source));
@@ -158,7 +158,7 @@ internal static class BsvPeerStreamTransportTestInfrastructure
         return payload[..written];
     }
 
-    private static byte[] CreateProtoconfPayload(uint maximumReceivePayloadLength)
+    internal static byte[] CreateProtoconfPayload(uint maximumReceivePayloadLength)
     {
         var payload = new byte[ProtoconfPayloadCodec.MaximumStreamPoliciesLength + 8];
         Assert.AreEqual(
@@ -172,7 +172,7 @@ internal static class BsvPeerStreamTransportTestInfrastructure
         return payload[..written];
     }
 
-    private static byte[] EncodeBasic(ReadOnlySpan<byte> command, ReadOnlySpan<byte> payload)
+    internal static byte[] EncodeBasic(ReadOnlySpan<byte> command, ReadOnlySpan<byte> payload)
     {
         var checksum = MessageChecksum.Compute(payload);
         Span<byte> checksumBytes = stackalloc byte[MessageChecksum.Length];
@@ -193,7 +193,7 @@ internal static class BsvPeerStreamTransportTestInfrastructure
         return frame;
     }
 
-    private static byte[] Concatenate(byte[] first, byte[] second)
+    internal static byte[] Concatenate(byte[] first, byte[] second)
     {
         var result = new byte[first.Length + second.Length];
         first.CopyTo(result, 0);
