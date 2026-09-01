@@ -19,7 +19,9 @@ internal sealed class LocalPrepareBroadcastCommand
         {
             await using var prepared = await PreparedBinaryTransaction.OpenAndValidateAsync(path, cancellationToken)
                 .ConfigureAwait(false);
-            await _events.WriteBroadcastPreparedAsync(prepared.Summary, CancellationToken.None)
+            await _events.WriteBroadcastPreparedAsync(
+                    prepared.Summary,
+                    cancellationToken: CancellationToken.None)
                 .ConfigureAwait(false);
             return CliExitCode.Success;
         }

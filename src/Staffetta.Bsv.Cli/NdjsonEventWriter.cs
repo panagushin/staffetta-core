@@ -1,7 +1,9 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Threading.Channels;
 using Staffetta.Core.Protocol.Cryptography;
 using Staffetta.Core.Protocol.Handshake;
+using Staffetta.Core.Protocol.Relay;
 using Staffetta.Core.Protocol.Transactions;
 using Staffetta.Core.Protocol.Transport;
 
@@ -18,6 +20,7 @@ internal sealed class NdjsonEventWriter
     };
 
     private readonly TextWriter _writer;
+    private readonly Channel<bool> _writeGate = CreateWriteGate();
     private long _sequence;
 
     internal NdjsonEventWriter(TextWriter writer) =>
@@ -28,9 +31,9 @@ internal sealed class NdjsonEventWriter
         string remotePeer,
         CancellationToken cancellationToken = default) =>
         WriteAsync(
-            new ConnectionOpenedEvent(
+            sequence => new ConnectionOpenedEvent(
                 Schema,
-                NextSequence(),
+                sequence,
                 "connection.opened",
                 requestedPeer,
                 remotePeer),
@@ -38,12 +41,12 @@ internal sealed class NdjsonEventWriter
 
     internal ValueTask WriteHandshakeReadyAsync(
         string peer,
-        in BsvPeerReadySnapshot snapshot,
+        BsvPeerReadySnapshot snapshot,
         CancellationToken cancellationToken = default) =>
         WriteAsync(
-            new HandshakeReadyEvent(
+            sequence => new HandshakeReadyEvent(
                 Schema,
-                NextSequence(),
+                sequence,
                 "handshake.ready",
                 peer,
                 snapshot.ProtocolVersion,
@@ -54,21 +57,80 @@ internal sealed class NdjsonEventWriter
     internal ValueTask WriteHandshakeRejectedAsync(
         string peer,
         CancellationToken cancellationToken = default) =>
-        WriteAsync(new HandshakeRejectedEvent(Schema, NextSequence(), "handshake.rejected", peer), cancellationToken);
+        WriteAsync(sequence => new HandshakeRejectedEvent(Schema, sequence, "handshake.rejected", peer), cancellationToken);
 
     internal ValueTask WriteBroadcastPreparedAsync(
-        in LegacyTransactionSummary summary,
+        LegacyTransactionSummary summary,
+        bool willBroadcast = false,
         CancellationToken cancellationToken = default) =>
         WriteAsync(
-            new BroadcastPreparedEvent(
+            sequence => new BroadcastPreparedEvent(
                 Schema,
-                NextSequence(),
+                sequence,
                 "broadcast.prepared",
                 summary.TransactionId.ToDisplayHex(),
                 Format(summary.SerializedLength),
                 Format(summary.InputCount),
                 Format(summary.OutputCount),
-                false),
+                willBroadcast),
+            cancellationToken);
+
+    internal ValueTask WriteBroadcastQueueAsync(
+        Hash256 transactionId,
+        BsvPeerTransportCommandQueueStatus status,
+        CancellationToken cancellationToken = default) =>
+        WriteAsync(
+            sequence => new BroadcastQueueEvent(
+                Schema,
+                sequence,
+                "broadcast.queue",
+                transactionId.ToDisplayHex(),
+                status.ToString()),
+            cancellationToken);
+
+    internal ValueTask WriteBroadcastApplicationAsync(
+        Hash256 transactionId,
+        BsvPeerTransportCommandApplication application,
+        CancellationToken cancellationToken = default) =>
+        WriteAsync(
+            sequence => new BroadcastApplicationEvent(
+                Schema,
+                sequence,
+                "broadcast.application",
+                transactionId.ToDisplayHex(),
+                application.Kind.ToString(),
+                application.Status.ToString()),
+            cancellationToken);
+
+    internal ValueTask WriteBroadcastFactAsync(
+        BsvTransactionBroadcastOutput output,
+        CancellationToken cancellationToken = default) =>
+        WriteAsync(
+            sequence => new BroadcastFactEvent(
+                Schema,
+                sequence,
+                "broadcast.fact",
+                output.TransactionId.ToDisplayHex(),
+                output.Kind.ToString()),
+            cancellationToken);
+
+    internal ValueTask WriteBroadcastObservationAsync(
+        Hash256 transactionId,
+        string outcome,
+        string reason,
+        string? transportKind = null,
+        string? transportReason = null,
+        CancellationToken cancellationToken = default) =>
+        WriteAsync(
+            sequence => new BroadcastObservationEvent(
+                Schema,
+                sequence,
+                "broadcast.observation",
+                transactionId.ToDisplayHex(),
+                outcome,
+                reason,
+                transportKind,
+                transportReason),
             cancellationToken);
 
     internal ValueTask WriteSessionTerminalAsync(
@@ -78,9 +140,9 @@ internal sealed class NdjsonEventWriter
         BsvHandshakeTerminalReason? handshakeReason = null,
         CancellationToken cancellationToken = default) =>
         WriteAsync(
-            new SessionTerminalEvent(
+            sequence => new SessionTerminalEvent(
                 Schema,
-                NextSequence(),
+                sequence,
                 "session.terminal",
                 stage,
                 kind,
@@ -89,21 +151,46 @@ internal sealed class NdjsonEventWriter
             cancellationToken);
 
     internal ValueTask WriteSessionStoppedAsync(
+        string reason = "completed",
         CancellationToken cancellationToken = default) =>
         WriteAsync(
-            new SessionStoppedEvent(Schema, NextSequence(), "session.stopped", "completed"),
+            sequence => new SessionStoppedEvent(Schema, sequence, "session.stopped", reason),
             cancellationToken);
 
     private static string Format(ulong value) =>
         value.ToString(System.Globalization.CultureInfo.InvariantCulture);
 
-    private long NextSequence() => checked(++_sequence);
-
-    private async ValueTask WriteAsync<T>(T value, CancellationToken cancellationToken)
+    private async ValueTask WriteAsync<T>(Func<long, T> create, CancellationToken cancellationToken)
     {
-        var line = JsonSerializer.Serialize(value, SerializerOptions);
-        await _writer.WriteLineAsync(line.AsMemory(), cancellationToken).ConfigureAwait(false);
-        await _writer.FlushAsync(cancellationToken).ConfigureAwait(false);
+        _ = await _writeGate.Reader.ReadAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var value = create(checked(++_sequence));
+            var line = JsonSerializer.Serialize(value, SerializerOptions);
+            await _writer.WriteLineAsync(line.AsMemory(), cancellationToken).ConfigureAwait(false);
+            await _writer.FlushAsync(cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            _ = _writeGate.Writer.TryWrite(true);
+        }
+    }
+
+    private static Channel<bool> CreateWriteGate()
+    {
+        var gate = Channel.CreateBounded<bool>(new BoundedChannelOptions(1)
+        {
+            FullMode = BoundedChannelFullMode.Wait,
+            SingleReader = false,
+            SingleWriter = false,
+            AllowSynchronousContinuations = false,
+        });
+        if (!gate.Writer.TryWrite(true))
+        {
+            throw new InvalidOperationException("The NDJSON write gate could not be initialized.");
+        }
+
+        return gate;
     }
 
     private sealed record ConnectionOpenedEvent(
@@ -137,6 +224,38 @@ internal sealed class NdjsonEventWriter
         string InputCount,
         string OutputCount,
         bool WillBroadcast);
+
+    private sealed record BroadcastQueueEvent(
+        string Schema,
+        long Sequence,
+        string Type,
+        string Txid,
+        string Status);
+
+    private sealed record BroadcastApplicationEvent(
+        string Schema,
+        long Sequence,
+        string Type,
+        string Txid,
+        string Kind,
+        string Status);
+
+    private sealed record BroadcastFactEvent(
+        string Schema,
+        long Sequence,
+        string Type,
+        string Txid,
+        string Fact);
+
+    private sealed record BroadcastObservationEvent(
+        string Schema,
+        long Sequence,
+        string Type,
+        string Txid,
+        string Outcome,
+        string Reason,
+        string? TransportKind,
+        string? TransportReason);
 
     private sealed record SessionTerminalEvent(
         string Schema,

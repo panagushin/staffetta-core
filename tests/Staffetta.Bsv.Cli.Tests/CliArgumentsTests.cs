@@ -49,6 +49,10 @@ public sealed class CliArgumentsTests
             ["prepare-broadcast", "--tx-file", "tx.bin", "--handshake-timeout-ms", "30000"],
             ["handshake", "--peer", "node.example:8333", "--peer", "node.example:8334"],
             ["prepare-broadcast", "--tx-file", "a", "--tx-file", "b"],
+            ["handshake", "--peer", "node.example:8333", "--broadcast-timeout-ms", "30000"],
+            ["broadcast", "--peer", "node.example:8333"],
+            ["broadcast", "--tx-file", "tx.bin"],
+            ["broadcast", "--peer", "node.example:8333", "--tx-file", "tx.bin", "--broadcast-timeout-ms", "1", "--broadcast-timeout-ms", "2"],
         ];
 
         foreach (var arguments in invalid)
@@ -62,5 +66,13 @@ public sealed class CliArgumentsTests
             out _,
             out var error), error);
         Assert.AreEqual(ReferenceCliCommand.PrepareBroadcast, prepared!.Command);
+
+        Assert.IsTrue(CliArguments.TryParse(
+            ["broadcast", "--peer", "node.example:8333", "--tx-file", "tx.bin", "--broadcast-timeout-ms", "1234"],
+            out var broadcast,
+            out _,
+            out error), error);
+        Assert.AreEqual(ReferenceCliCommand.Broadcast, broadcast!.Command);
+        Assert.AreEqual(TimeSpan.FromMilliseconds(1234), broadcast.BroadcastTimeout);
     }
 }

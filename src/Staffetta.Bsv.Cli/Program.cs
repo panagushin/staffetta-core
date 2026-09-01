@@ -6,6 +6,7 @@ internal static class Program
         "Usage:\n" +
         "  staffetta-bsv handshake --peer <host:port|[IPv6]:port> [--connect-timeout-ms <n>] [--handshake-timeout-ms <n>]\n" +
         "  staffetta-bsv prepare-broadcast --tx-file <binary-path>\n" +
+        "  staffetta-bsv broadcast --peer <host:port|[IPv6]:port> --tx-file <binary-path> [--connect-timeout-ms <n>] [--handshake-timeout-ms <n>] [--broadcast-timeout-ms <n>]\n" +
         "prepare-broadcast is local: it never connects or broadcasts.";
 
     private static async Task<int> Main(string[] args)

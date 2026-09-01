@@ -1,5 +1,6 @@
 using System.Buffers;
 using System.Net;
+using Staffetta.Core.Protocol.Cryptography;
 using Staffetta.Core.Protocol.Handshake;
 using Staffetta.Core.Protocol.Messages;
 using Staffetta.Core.Protocol.Wire;
@@ -75,23 +76,48 @@ internal sealed class FakePeerConnection : IPeerConnection
 
 internal sealed class ScriptedDuplexStream : Stream
 {
-    private readonly byte[] _input;
+    private readonly object _gate = new();
+    private readonly Queue<byte> _input = new();
     private readonly bool _endWithEof;
     private readonly MemoryStream _written = new();
     private readonly TaskCompletionSource _readPending =
         new(TaskCreationOptions.RunContinuationsAsynchronously);
-    private int _offset;
+    private PendingRead? _pendingRead;
     private bool _aborted;
+    private int _failNextWrite;
 
     internal ScriptedDuplexStream(byte[] input, bool endWithEof)
     {
-        _input = input;
         _endWithEof = endWithEof;
+        foreach (var value in input)
+        {
+            _input.Enqueue(value);
+        }
     }
 
     internal Task ReadPending => _readPending.Task;
 
-    internal byte[] WrittenBytes => _written.ToArray();
+    internal bool IsReadPending
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _pendingRead is not null;
+            }
+        }
+    }
+
+    internal byte[] WrittenBytes
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _written.ToArray();
+            }
+        }
+    }
 
     public override bool CanRead => true;
 
@@ -111,19 +137,27 @@ internal sealed class ScriptedDuplexStream : Stream
         Memory<byte> buffer,
         CancellationToken cancellationToken = default)
     {
-        if (_offset < _input.Length)
+        lock (_gate)
         {
-            buffer.Span[0] = _input[_offset++];
-            return ValueTask.FromResult(1);
-        }
+            cancellationToken.ThrowIfCancellationRequested();
+            if (_input.Count != 0)
+            {
+                return ValueTask.FromResult(CopyInput(buffer.Span));
+            }
 
-        if (_endWithEof || _aborted)
-        {
-            return ValueTask.FromResult(0);
-        }
+            if (_endWithEof || _aborted)
+            {
+                return ValueTask.FromResult(0);
+            }
 
-        _readPending.TrySetResult();
-        return AwaitCancellationAsync(cancellationToken);
+            _readPending.TrySetResult();
+            var pending = new PendingRead(buffer);
+            _pendingRead = pending;
+            pending.Registration = cancellationToken.Register(
+                static state => ((ScriptedDuplexStream)state!).CancelPendingRead(),
+                this);
+            return new ValueTask<int>(pending.Completion.Task);
+        }
     }
 
     public override ValueTask WriteAsync(
@@ -131,14 +165,55 @@ internal sealed class ScriptedDuplexStream : Stream
         CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        _written.Write(buffer.Span);
+        if (Interlocked.Exchange(ref _failNextWrite, 0) != 0)
+        {
+            return ValueTask.FromException(new IOException("scripted write failure"));
+        }
+
+        lock (_gate)
+        {
+            _written.Write(buffer.Span);
+        }
         return ValueTask.CompletedTask;
     }
 
+    internal void FailNextWrite() => Interlocked.Exchange(ref _failNextWrite, 1);
+
     internal void Abort()
     {
-        _aborted = true;
+        PendingRead? pending;
+        lock (_gate)
+        {
+            _aborted = true;
+            pending = _pendingRead;
+            _pendingRead = null;
+        }
+
+        pending?.Completion.TrySetResult(0);
+        pending?.Registration.Dispose();
         _readPending.TrySetResult();
+    }
+
+    internal void AppendInput(byte[] input)
+    {
+        PendingRead? pending;
+        lock (_gate)
+        {
+            foreach (var value in input)
+            {
+                _input.Enqueue(value);
+            }
+
+            pending = _pendingRead;
+            _pendingRead = null;
+            if (pending is not null)
+            {
+                _ = CopyInput(pending.Buffer.Span);
+            }
+        }
+
+        pending?.Completion.TrySetResult(input.Length);
+        pending?.Registration.Dispose();
     }
 
     public override void Flush() { }
@@ -152,10 +227,35 @@ internal sealed class ScriptedDuplexStream : Stream
     public override void Write(byte[] buffer, int offset, int count) =>
         _written.Write(buffer, offset, count);
 
-    private static async ValueTask<int> AwaitCancellationAsync(CancellationToken cancellationToken)
+    private void CancelPendingRead()
     {
-        await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken).ConfigureAwait(false);
-        return 0;
+        PendingRead? pending;
+        lock (_gate)
+        {
+            pending = _pendingRead;
+            _pendingRead = null;
+        }
+
+        pending?.Completion.TrySetCanceled();
+    }
+
+    private int CopyInput(Span<byte> destination)
+    {
+        var count = Math.Min(destination.Length, _input.Count);
+        for (var index = 0; index < count; index++)
+        {
+            destination[index] = _input.Dequeue();
+        }
+
+        return count;
+    }
+
+    private sealed class PendingRead(Memory<byte> buffer)
+    {
+        internal Memory<byte> Buffer { get; } = buffer;
+        internal TaskCompletionSource<int> Completion { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        internal CancellationTokenRegistration Registration { get; set; }
     }
 }
 
@@ -219,6 +319,40 @@ internal static class PeerFrames
         return Concat(readyPrefix[..versionLength], Encode("reject"u8, payload[..payloadLength]));
     }
 
+    internal static byte[] ReadyThen(params byte[][] frames)
+    {
+        var result = Ready();
+        foreach (var frame in frames)
+        {
+            result = Concat(result, frame);
+        }
+
+        return result;
+    }
+
+    internal static byte[] Inventory(string command, Hash256 transactionId)
+    {
+        var payload = new byte[1 + InventoryVectorCodec.EncodedLength];
+        var vectors = new[] { new InventoryVector(1, transactionId) };
+        AssertDone(InventoryPayloadCodec.TryWrite(vectors, payload, (ulong)payload.Length, out var written));
+        return Encode(System.Text.Encoding.ASCII.GetBytes(command), payload.AsSpan(0, written));
+    }
+
+    internal static byte[] TransactionReject(Hash256 transactionId)
+    {
+        Span<byte> hash = stackalloc byte[Hash256.Length];
+        AssertDone(transactionId.TryCopyWireBytesTo(hash, out _));
+        Span<byte> payload = stackalloc byte[RejectPayloadCodec.MaximumPayloadLength];
+        AssertDone(RejectPayloadCodec.TryWrite(
+            payload,
+            "tx"u8,
+            code: 0x10,
+            "rejected"u8,
+            hash,
+            out var payloadLength));
+        return Encode("reject"u8, payload[..payloadLength]);
+    }
+
     internal static string[] ReadOutboundCommands(byte[] wire)
     {
         var commands = new List<string>();
@@ -239,6 +373,31 @@ internal static class PeerFrames
         }
 
         return [.. commands];
+    }
+
+    internal static byte[] ReadOutboundPayload(byte[] wire, string expectedCommand)
+    {
+        var offset = 0;
+        Span<byte> command = stackalloc byte[MessageCommand.MaximumLength];
+        while (offset < wire.Length)
+        {
+            AssertDone(MessageHeaderCodec.TryParse(
+                wire.AsSpan(offset),
+                MainnetMagic,
+                ulong.MaxValue,
+                out var header,
+                out var headerLength));
+            AssertDone(header.Command.TryCopyTo(command, out var commandLength));
+            var length = checked((int)header.PayloadLength);
+            if (System.Text.Encoding.ASCII.GetString(command[..commandLength]) == expectedCommand)
+            {
+                return wire.AsSpan(offset + headerLength, length).ToArray();
+            }
+
+            offset += checked(headerLength + length);
+        }
+
+        throw new InvalidOperationException($"Outbound command '{expectedCommand}' was not found.");
     }
 
     private static byte[] Encode(ReadOnlySpan<byte> command, ReadOnlySpan<byte> payload)

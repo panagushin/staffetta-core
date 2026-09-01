@@ -6,5 +6,8 @@
     <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleToAttribute">
       <_Parameter1>Staffetta.Bsv.Cli</_Parameter1>
     </AssemblyAttribute>
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleToAttribute">
+      <_Parameter1>Staffetta.Bsv.Cli.Tests</_Parameter1>
+    </AssemblyAttribute>
   </ItemGroup>
 </Project>

@@ -17,7 +17,16 @@ internal sealed class CorePeerSessionBridge : IBsvPeerSessionFactSink, IAsyncDis
     private readonly string _peer;
     private readonly NdjsonEventWriter _events;
     private readonly BsvPeerStreamTransportActor _actor;
+    private readonly bool _allowBroadcast;
     private readonly TaskCompletionSource _ready =
+        new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private readonly TaskCompletionSource<BsvTransactionBroadcastOutputKind> _deliveryOutcome =
+        new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private readonly TaskCompletionSource _observedFromPeer =
+        new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private readonly TaskCompletionSource _rejected =
+        new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private readonly TaskCompletionSource _applicationReported =
         new(TaskCreationOptions.RunContinuationsAsynchronously);
 
     internal CorePeerSessionBridge(
@@ -28,9 +37,55 @@ internal sealed class CorePeerSessionBridge : IBsvPeerSessionFactSink, IAsyncDis
         NdjsonEventWriter events,
         long timestampUnixSeconds,
         ulong nonce)
+        : this(
+            stream,
+            remoteAddress,
+            remotePort,
+            peer,
+            events,
+            timestampUnixSeconds,
+            nonce,
+            RejectingTransactionSourceProvider.Instance,
+            allowBroadcast: false)
+    {
+    }
+
+    internal CorePeerSessionBridge(
+        Stream stream,
+        IPAddress remoteAddress,
+        int remotePort,
+        string peer,
+        NdjsonEventWriter events,
+        long timestampUnixSeconds,
+        ulong nonce,
+        IBsvTransactionPayloadSourceProvider transactionSources)
+        : this(
+            stream,
+            remoteAddress,
+            remotePort,
+            peer,
+            events,
+            timestampUnixSeconds,
+            nonce,
+            transactionSources,
+            allowBroadcast: true)
+    {
+    }
+
+    private CorePeerSessionBridge(
+        Stream stream,
+        IPAddress remoteAddress,
+        int remotePort,
+        string peer,
+        NdjsonEventWriter events,
+        long timestampUnixSeconds,
+        ulong nonce,
+        IBsvTransactionPayloadSourceProvider transactionSources,
+        bool allowBroadcast)
     {
         _peer = peer;
         _events = events;
+        _allowBroadcast = allowBroadcast;
         var receivingAddress = new NetworkAddress(
             Services,
             remoteAddress.MapToIPv6().GetAddressBytes(),
@@ -56,12 +111,18 @@ internal sealed class CorePeerSessionBridge : IBsvPeerSessionFactSink, IAsyncDis
             VersionPayloadCodec.CurrentProtocolVersion,
             localHandshake,
             NoOpTransactionSink.Instance,
-            RejectingTransactionSourceProvider.Instance,
+            transactionSources,
             this,
             new BsvPeerStreamTransportOptions(leaveOpen: true));
     }
 
     internal Task Ready => _ready.Task;
+
+    internal Task<BsvTransactionBroadcastOutputKind> DeliveryOutcome => _deliveryOutcome.Task;
+
+    internal Task ObservedFromPeer => _observedFromPeer.Task;
+
+    internal Task Rejected => _rejected.Task;
 
     internal BsvHandshakeTerminalReason HandshakeTerminalReason =>
         _actor.HandshakeTerminalReason;
@@ -69,6 +130,35 @@ internal sealed class CorePeerSessionBridge : IBsvPeerSessionFactSink, IAsyncDis
     internal Task<BsvPeerTransportActorCompletion> RunAsync() => _actor.RunAsync();
 
     internal ValueTask StopAsync() => _actor.StopAsync();
+
+    internal BsvPeerTransportCommandSubmission QueueBroadcast(Hash256 transactionId)
+    {
+        if (!_allowBroadcast)
+        {
+            throw new InvalidOperationException("The reference handshake command cannot broadcast.");
+        }
+
+        return _actor.QueueBroadcast(transactionId);
+    }
+
+    internal async Task<BsvPeerTransportCommandApplication> ReportBroadcastApplicationAsync(
+        Hash256 transactionId,
+        Task<BsvPeerTransportCommandApplication> application)
+    {
+        try
+        {
+            var applied = await application.ConfigureAwait(false);
+            await _events.WriteBroadcastApplicationAsync(transactionId, applied, CancellationToken.None)
+                .ConfigureAwait(false);
+            _applicationReported.TrySetResult();
+            return applied;
+        }
+        catch (Exception exception)
+        {
+            _applicationReported.TrySetException(exception);
+            throw;
+        }
+    }
 
     public ValueTask DisposeAsync() => _actor.DisposeAsync();
 
@@ -93,10 +183,31 @@ internal sealed class CorePeerSessionBridge : IBsvPeerSessionFactSink, IAsyncDis
         }
     }
 
-    public ValueTask OnBroadcastFactAsync(
+    public async ValueTask OnBroadcastFactAsync(
         BsvTransactionBroadcastOutput output,
-        CancellationToken cancellationToken) =>
-        ValueTask.FromException(new InvalidOperationException("The reference handshake command cannot broadcast."));
+        CancellationToken cancellationToken)
+    {
+        if (!_allowBroadcast)
+        {
+            throw new InvalidOperationException("The reference handshake command cannot broadcast.");
+        }
+
+        await _applicationReported.Task.ConfigureAwait(false);
+        await _events.WriteBroadcastFactAsync(output, cancellationToken).ConfigureAwait(false);
+        if (output.Kind == BsvTransactionBroadcastOutputKind.SentToPeer)
+        {
+            _deliveryOutcome.TrySetResult(output.Kind);
+        }
+        else if (output.Kind == BsvTransactionBroadcastOutputKind.ObservedFromPeer)
+        {
+            _observedFromPeer.TrySetResult();
+        }
+        else if (output.Kind == BsvTransactionBroadcastOutputKind.Rejected)
+        {
+            _rejected.TrySetResult();
+            _deliveryOutcome.TrySetResult(output.Kind);
+        }
+    }
 
     public ValueTask OnFetchFactAsync(
         BsvTransactionFetchOutput output,

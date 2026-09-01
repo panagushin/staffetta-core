@@ -24,9 +24,15 @@ dotnet run --project src/Staffetta.Bsv.Cli -- \
 
 dotnet run --project src/Staffetta.Bsv.Cli -- \
   prepare-broadcast --tx-file ./transaction.bin
+
+dotnet run --project src/Staffetta.Bsv.Cli -- \
+  broadcast --peer node.example:8333 --tx-file ./transaction.bin
 ```
 
 `prepare-broadcast` is strictly local. It incrementally validates and identifies
 one binary legacy transaction, but never connects, announces, or broadcasts it.
 The `handshake` command cannot access transaction bytes and emits only protocol
-handshake traffic.
+handshake traffic. `broadcast` performs the same local validation before it
+connects, then uses the single peer's `inv`/`getdata`/`tx` flow. Exit code zero
+requires a transport-committed `SentToPeer` fact; relay-back is reported
+separately. The command does not sign, persist, or retry transactions.

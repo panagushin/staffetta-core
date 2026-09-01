@@ -8,6 +8,7 @@ internal enum ReferenceCliCommand
 {
     Handshake,
     PrepareBroadcast,
+    Broadcast,
 }
 
 internal readonly record struct PeerEndpoint(string Host, int Port)
@@ -22,10 +23,12 @@ internal sealed record CliArguments(
     PeerEndpoint? Peer,
     string? TransactionFile,
     TimeSpan ConnectTimeout,
-    TimeSpan HandshakeTimeout)
+    TimeSpan HandshakeTimeout,
+    TimeSpan BroadcastTimeout = default)
 {
     internal const int DefaultConnectTimeoutMilliseconds = 5_000;
     internal const int DefaultHandshakeTimeoutMilliseconds = 30_000;
+    internal const int DefaultBroadcastTimeoutMilliseconds = 30_000;
 
     internal static bool TryParse(
         IReadOnlyList<string> arguments,
@@ -44,7 +47,7 @@ internal sealed record CliArguments(
 
         if (arguments.Count == 0 || !TryParseCommand(arguments[0], out var command))
         {
-            error = "Expected command 'handshake' or 'prepare-broadcast'.";
+            error = "Expected command 'handshake', 'prepare-broadcast', or 'broadcast'.";
             return false;
         }
 
@@ -52,8 +55,10 @@ internal sealed record CliArguments(
         string? transactionFile = null;
         var connectTimeout = DefaultConnectTimeoutMilliseconds;
         var handshakeTimeout = DefaultHandshakeTimeoutMilliseconds;
+        var broadcastTimeout = DefaultBroadcastTimeoutMilliseconds;
         var hasConnectTimeout = false;
         var hasHandshakeTimeout = false;
+        var hasBroadcastTimeout = false;
         var hasPeer = false;
         var hasTransactionFile = false;
         for (var index = 1; index < arguments.Count; index++)
@@ -138,27 +143,42 @@ internal sealed record CliArguments(
                     hasHandshakeTimeout = true;
 
                     break;
+                case "--broadcast-timeout-ms":
+                    if (hasBroadcastTimeout)
+                    {
+                        error = "Option '--broadcast-timeout-ms' may be specified only once.";
+                        return false;
+                    }
+
+                    if (!TryParsePositiveMilliseconds(value, out broadcastTimeout))
+                    {
+                        error = "Broadcast timeout must be a positive integer number of milliseconds.";
+                        return false;
+                    }
+
+                    hasBroadcastTimeout = true;
+                    break;
                 default:
                     error = $"Unknown option '{option}'.";
                     return false;
             }
         }
 
-        if (command == ReferenceCliCommand.Handshake && peer is null)
+        if (command is ReferenceCliCommand.Handshake or ReferenceCliCommand.Broadcast && peer is null)
         {
             error = "Option '--peer' is required.";
             return false;
         }
 
-        if (command == ReferenceCliCommand.PrepareBroadcast && transactionFile is null)
+        if (command is ReferenceCliCommand.PrepareBroadcast or ReferenceCliCommand.Broadcast && transactionFile is null)
         {
-            error = "Option '--tx-file' is required for prepare-broadcast.";
+            error = "Option '--tx-file' is required for prepare-broadcast and broadcast.";
             return false;
         }
 
         if (command == ReferenceCliCommand.Handshake && transactionFile is not null)
         {
-            error = "Option '--tx-file' is valid only for prepare-broadcast.";
+            error = "Option '--tx-file' is valid only for prepare-broadcast or broadcast.";
             return false;
         }
 
@@ -169,9 +189,15 @@ internal sealed record CliArguments(
         }
 
         if (command == ReferenceCliCommand.PrepareBroadcast &&
-            (hasConnectTimeout || hasHandshakeTimeout))
+            (hasConnectTimeout || hasHandshakeTimeout || hasBroadcastTimeout))
         {
             error = "prepare-broadcast is local and does not accept network timeouts.";
+            return false;
+        }
+
+        if (command == ReferenceCliCommand.Handshake && hasBroadcastTimeout)
+        {
+            error = "Option '--broadcast-timeout-ms' is valid only for broadcast.";
             return false;
         }
 
@@ -180,7 +206,8 @@ internal sealed record CliArguments(
             peer,
             transactionFile,
             TimeSpan.FromMilliseconds(connectTimeout),
-            TimeSpan.FromMilliseconds(handshakeTimeout));
+            TimeSpan.FromMilliseconds(handshakeTimeout),
+            TimeSpan.FromMilliseconds(broadcastTimeout));
         return true;
     }
 
@@ -190,9 +217,10 @@ internal sealed record CliArguments(
         {
             "handshake" => ReferenceCliCommand.Handshake,
             "prepare-broadcast" => ReferenceCliCommand.PrepareBroadcast,
+            "broadcast" => ReferenceCliCommand.Broadcast,
             _ => default,
         };
-        return value is "handshake" or "prepare-broadcast";
+        return value is "handshake" or "prepare-broadcast" or "broadcast";
     }
 
     private static bool TryParsePeer(string value, out PeerEndpoint endpoint)
