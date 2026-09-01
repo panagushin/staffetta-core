@@ -10,6 +10,7 @@ internal sealed class BsvHandshakeFrameProcessor : IDisposable
 
     private readonly BsvHandshakeOutput[] _pendingOutputs =
         new BsvHandshakeOutput[BsvHandshakeStateMachine.MaximumOutputCount];
+    private readonly BsvHandshakeEgressIntentQueue _egressIntents = new();
     private readonly byte[] _smallPayloadBuffer = new byte[MaximumStagedPayloadLength];
 
     private IncrementalProtoconfPayloadParser _protoconfParser;
@@ -19,16 +20,22 @@ internal sealed class BsvHandshakeFrameProcessor : IDisposable
     private bool _frameAborted;
     private bool _frameProcessingFailed;
     private bool _hasActiveFrame;
+    private readonly bool _trackEgressProvenance;
     private bool _isDisposed;
 
-    internal BsvHandshakeFrameProcessor(int minimumPeerProtocolVersion)
+    internal BsvHandshakeFrameProcessor(
+        int minimumPeerProtocolVersion,
+        bool trackEgressProvenance = false)
     {
         Handshake = new BsvHandshakeStateMachine(minimumPeerProtocolVersion);
+        _trackEgressProvenance = trackEgressProvenance;
     }
 
     internal BsvHandshakeStateMachine Handshake { get; }
 
     internal int PendingOutputCount => _pendingOutputCount;
+
+    internal int PendingEgressIntentCount => _egressIntents.Count;
 
     internal bool FrameAborted => _frameAborted;
 
@@ -67,11 +74,37 @@ internal sealed class BsvHandshakeFrameProcessor : IDisposable
             return OperationStatus.DestinationTooSmall;
         }
 
+        if (_trackEgressProvenance && _egressIntents.Count != 0)
+        {
+            return OperationStatus.DestinationTooSmall;
+        }
+
         _pendingOutputs.AsSpan(0, _pendingOutputCount).CopyTo(destination);
         outputsWritten = _pendingOutputCount;
+        if (_trackEgressProvenance &&
+            !_egressIntents.TryEnqueueFromOutputs(_pendingOutputs.AsSpan(0, _pendingOutputCount)))
+        {
+            return OperationStatus.InvalidData;
+        }
+
         _pendingOutputs.AsSpan(0, _pendingOutputCount).Clear();
         _pendingOutputCount = 0;
         return OperationStatus.Done;
+    }
+
+    internal bool TryPeekEgressIntent(out BsvHandshakeOutput output)
+    {
+        return _egressIntents.TryPeek(out output);
+    }
+
+    internal bool TryConsumeEgressIntent(in BsvHandshakeOutput expected) =>
+        _egressIntents.TryConsume(expected);
+
+    internal void DiscardOutputsAndEgressIntents()
+    {
+        _pendingOutputs.AsSpan().Clear();
+        _pendingOutputCount = 0;
+        _egressIntents.Clear();
     }
 
     internal void BeginConsume()
@@ -171,6 +204,7 @@ internal sealed class BsvHandshakeFrameProcessor : IDisposable
         ResetStagedFrame();
         _pendingOutputs.AsSpan().Clear();
         _pendingOutputCount = 0;
+        _egressIntents.Clear();
         _isDisposed = true;
     }
 

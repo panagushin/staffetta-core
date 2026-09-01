@@ -13,9 +13,9 @@ namespace Staffetta.Core.Protocol.Sessions;
 /// </summary>
 /// <remarks>
 /// Instances are single-consumer and not thread-safe. Every pending output must be drained before
-/// more input is consumed. Draining a send intent never acknowledges a transport write; relay
-/// write facts enter the session only through its owned egress planner after the exact frame is
-/// fully acknowledged.
+/// more input is consumed. Draining a send intent never acknowledges a transport write; handshake
+/// and relay write facts enter the session only through its owned egress planner after the exact
+/// frame is fully acknowledged.
 /// Transaction sink callbacks remain provisional until both the transaction structure and its
 /// enclosing frame are validated.
 /// </remarks>
@@ -108,6 +108,9 @@ public sealed class BsvPeerSessionIngressAdapter :
 
     public int PendingHandshakeOutputCount => _processor.PendingHandshakeOutputCount;
 
+    internal int PendingHandshakeEgressIntentCount =>
+        _processor.PendingHandshakeEgressIntentCount;
+
     public int PendingBroadcastOutputCount => _processor.PendingBroadcastOutputCount;
 
     public int PendingFetchOutputCount => _processor.PendingFetchOutputCount;
@@ -117,9 +120,12 @@ public sealed class BsvPeerSessionIngressAdapter :
     public OperationStatus StartHandshake(ulong localNonce)
     {
         ThrowIfUnavailable();
-        if (_isCompleted || _isIngressUnusable || HasPendingOutputs)
+        if (_isCompleted ||
+            _isIngressUnusable ||
+            HasPendingOutputs ||
+            PendingHandshakeEgressIntentCount != 0)
         {
-            return HasPendingOutputs
+            return HasPendingOutputs || PendingHandshakeEgressIntentCount != 0
                 ? OperationStatus.DestinationTooSmall
                 : OperationStatus.InvalidData;
         }
@@ -135,7 +141,7 @@ public sealed class BsvPeerSessionIngressAdapter :
             return OperationStatus.InvalidData;
         }
 
-        if (HasPendingOutputs)
+        if (HasPendingOutputs || PendingHandshakeEgressIntentCount != 0)
         {
             return OperationStatus.DestinationTooSmall;
         }
@@ -151,7 +157,7 @@ public sealed class BsvPeerSessionIngressAdapter :
             return OperationStatus.InvalidData;
         }
 
-        if (HasPendingOutputs)
+        if (HasPendingOutputs || PendingHandshakeEgressIntentCount != 0)
         {
             return OperationStatus.DestinationTooSmall;
         }
@@ -163,48 +169,77 @@ public sealed class BsvPeerSessionIngressAdapter :
 
     internal MessageFrameWriteSegment PendingEgressSegment => _egress.PendingSegment;
 
-    internal OperationStatus PlanHandshakeEgress(
-        in BsvHandshakeOutput output,
-        out BsvPeerSessionOutputDisposition disposition)
+    internal OperationStatus PlanNextHandshakeEgress()
     {
         ThrowIfUnavailable();
         if (!CanPlanEgress(requireReady: false, out var blockedStatus))
         {
-            disposition = BsvPeerSessionOutputDisposition.Send;
             return blockedStatus;
         }
 
+        if (!_processor.TryPeekHandshakeEgressIntent(out var intent) ||
+            intent.Kind is not BsvHandshakeOutputKind.SendVerack and
+                not BsvHandshakeOutputKind.SendPong and
+                not BsvHandshakeOutputKind.SendPing)
+        {
+            return OperationStatus.InvalidData;
+        }
+
         return _egress.PlanHandshake(
-            output,
+            intent,
             EffectivePeerMaximumReceivePayloadLength,
-            out disposition);
+            out _);
     }
 
-    internal OperationStatus PlanVersionEgress(
-        in BsvHandshakeOutput output,
-        VersionPayload payload)
+    internal OperationStatus PlanVersionEgress(VersionPayload payload)
     {
         ThrowIfUnavailable();
-        return CanPlanEgress(requireReady: false, out var blockedStatus)
-            ? _egress.PlanVersion(output, payload, EffectivePeerMaximumReceivePayloadLength)
-            : blockedStatus;
+        if (!CanPlanEgress(requireReady: false, out var blockedStatus))
+        {
+            return blockedStatus;
+        }
+
+        if (!_processor.TryPeekHandshakeEgressIntent(out var intent) ||
+            intent.Kind != BsvHandshakeOutputKind.SendVersion ||
+            payload.Nonce != intent.Value ||
+            !payload.HasSourceAddress ||
+            !payload.HasUserAgent ||
+            !payload.HasStartHeight ||
+            !payload.HasRelay ||
+            payload.UserAgent.Length > VersionPayloadCodec.MaximumUserAgentLength ||
+            payload.AssociationId.Length > VersionPayloadCodec.MaximumAssociationIdLength)
+        {
+            return OperationStatus.InvalidData;
+        }
+
+        return _egress.PlanVersion(intent, payload, EffectivePeerMaximumReceivePayloadLength);
     }
 
     internal OperationStatus PlanProtoconfEgress(
-        in BsvHandshakeOutput output,
         uint maximumReceivePayloadLength,
         ReadOnlySpan<byte> streamPolicies,
         bool includeStreamPolicies)
     {
         ThrowIfUnavailable();
-        return CanPlanEgress(requireReady: false, out var blockedStatus)
-            ? _egress.PlanProtoconf(
-                output,
-                maximumReceivePayloadLength,
-                streamPolicies,
-                includeStreamPolicies,
-                EffectivePeerMaximumReceivePayloadLength)
-            : blockedStatus;
+        if (!CanPlanEgress(requireReady: false, out var blockedStatus))
+        {
+            return blockedStatus;
+        }
+
+        if (!_processor.TryPeekHandshakeEgressIntent(out var intent) ||
+            intent.Kind != BsvHandshakeOutputKind.SendProtoconf ||
+            (!includeStreamPolicies && !streamPolicies.IsEmpty) ||
+            streamPolicies.Length > ProtoconfPayloadCodec.MaximumStreamPoliciesLength)
+        {
+            return OperationStatus.InvalidData;
+        }
+
+        return _egress.PlanProtoconf(
+            intent,
+            maximumReceivePayloadLength,
+            streamPolicies,
+            includeStreamPolicies,
+            EffectivePeerMaximumReceivePayloadLength);
     }
 
     internal OperationStatus PlanBroadcastEgress(
@@ -330,6 +365,11 @@ public sealed class BsvPeerSessionIngressAdapter :
     {
         ThrowIfUnavailable();
         bytesConsumed = 0;
+        if (PendingHandshakeEgressIntentCount != 0)
+        {
+            return OperationStatus.DestinationTooSmall;
+        }
+
         if (_isCompleted ||
             _isIngressUnusable ||
             HandshakeState is BsvHandshakeState.Created or BsvHandshakeState.Terminal)
@@ -494,9 +534,12 @@ public sealed class BsvPeerSessionIngressAdapter :
 
         if (completion.RelayWriteCommitKind == BsvPeerSessionRelayWriteCommitKind.None)
         {
-            return IsValidHandshakeCompletion(completion)
-                ? OperationStatus.Done
-                : OperationStatus.InvalidData;
+            if (!_processor.CanApplyHandshakeEgressCompletion(completion))
+            {
+                return OperationStatus.InvalidData;
+            }
+
+            return _processor.ApplyHandshakeEgressCompletion(completion);
         }
 
         if (!CanApplyReadyTransition())
@@ -525,7 +568,9 @@ public sealed class BsvPeerSessionIngressAdapter :
     private bool CanPlanEgress(bool requireReady, out OperationStatus blockedStatus)
     {
         blockedStatus = OperationStatus.InvalidData;
-        if (!CanUseEgress() || (requireReady && !CanApplyReadyTransition()))
+        if (!CanUseEgress() ||
+            (requireReady &&
+                (!CanApplyReadyTransition() || PendingHandshakeEgressIntentCount != 0)))
         {
             return false;
         }
@@ -541,15 +586,6 @@ public sealed class BsvPeerSessionIngressAdapter :
 
     private bool CanUseEgress() =>
         !_isCompleted && !_isIngressUnusable && !_isEgressDisposed;
-
-    private static bool IsValidHandshakeCompletion(
-        in BsvPeerSessionEgressCompletion completion) =>
-        completion.TransactionId == default &&
-        completion.SendKind is BsvPeerSessionSendKind.Version or
-            BsvPeerSessionSendKind.Verack or
-            BsvPeerSessionSendKind.Protoconf or
-            BsvPeerSessionSendKind.Pong or
-            BsvPeerSessionSendKind.Ping;
 
     private void TerminateSession(BsvPeerSessionTerminationCause cause)
     {

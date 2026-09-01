@@ -384,7 +384,7 @@ public sealed class BsvPeerSessionIngressAdapterTests
             VersionPayloadCodec.TryParse(encodedVersion, out var version, out var consumed));
         Assert.AreEqual(encodedVersion.Length, consumed);
 
-        Assert.AreEqual(OperationStatus.Done, session.PlanVersionEgress(outputs[0], version));
+        Assert.AreEqual(OperationStatus.Done, session.PlanVersionEgress(version));
         DrainEgress(session);
         Assert.AreEqual(OperationStatus.Done, session.CommitEgressCompletion());
         Assert.AreEqual(BsvPeerSessionEgressState.Idle, session.EgressState);
@@ -590,12 +590,24 @@ public sealed class BsvPeerSessionIngressAdapterTests
         Assert.AreEqual(OperationStatus.Done, session.DrainHandshakeOutputs(outputs, out var written));
         Assert.AreEqual(1, written);
         Assert.AreEqual(BsvHandshakeOutputKind.SendVersion, outputs[0].Kind);
+        CommitLocalVersionEgress(session);
 
         ConsumeFrame(session, EncodeBasic("version"u8, CreateVersionPayload(PeerNonce)), bytewise);
         Assert.AreEqual(OperationStatus.Done, session.DrainHandshakeOutputs(outputs, out written));
         Assert.AreEqual(2, written);
         Assert.AreEqual(BsvHandshakeOutputKind.SendVerack, outputs[0].Kind);
         Assert.AreEqual(BsvHandshakeOutputKind.SendProtoconf, outputs[1].Kind);
+        Assert.AreEqual(OperationStatus.Done, session.PlanNextHandshakeEgress());
+        DrainEgress(session);
+        Assert.AreEqual(OperationStatus.Done, session.CommitEgressCompletion());
+        Assert.AreEqual(
+            OperationStatus.Done,
+            session.PlanProtoconfEgress(
+                checked((uint)MaximumPayloadLength),
+                default,
+                includeStreamPolicies: false));
+        DrainEgress(session);
+        Assert.AreEqual(OperationStatus.Done, session.CommitEgressCompletion());
 
         ConsumeFrame(session, EncodeBasic("verack"u8, []), bytewise);
         Assert.AreEqual(OperationStatus.Done, session.DrainHandshakeOutputs(outputs, out written));
@@ -622,6 +634,18 @@ public sealed class BsvPeerSessionIngressAdapterTests
                 peerMaximumReceivePayloadLength.Value,
                 session.EffectivePeerMaximumReceivePayloadLength);
         }
+    }
+
+    private static void CommitLocalVersionEgress(BsvPeerSessionIngressAdapter session)
+    {
+        var encodedVersion = CreateVersionPayload(LocalNonce);
+        Assert.AreEqual(
+            OperationStatus.Done,
+            VersionPayloadCodec.TryParse(encodedVersion, out var version, out var consumed));
+        Assert.AreEqual(encodedVersion.Length, consumed);
+        Assert.AreEqual(OperationStatus.Done, session.PlanVersionEgress(version));
+        DrainEgress(session);
+        Assert.AreEqual(OperationStatus.Done, session.CommitEgressCompletion());
     }
 
     private static void ConsumeFrame(

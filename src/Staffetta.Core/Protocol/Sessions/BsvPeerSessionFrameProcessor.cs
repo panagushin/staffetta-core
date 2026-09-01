@@ -46,7 +46,9 @@ internal sealed class BsvPeerSessionFrameProcessor :
         int minimumPeerProtocolVersion,
         ILegacyTransactionSink transactionSink)
     {
-        _handshakeProcessor = new BsvHandshakeFrameProcessor(minimumPeerProtocolVersion);
+        _handshakeProcessor = new BsvHandshakeFrameProcessor(
+            minimumPeerProtocolVersion,
+            trackEgressProvenance: true);
         _transactionParser = new LegacyTransactionParser(
             transactionSink,
             LegacyTransactionHashMode.ExternalValidatedPayload);
@@ -95,6 +97,9 @@ internal sealed class BsvPeerSessionFrameProcessor :
 
     internal int PendingHandshakeOutputCount => _handshakeProcessor.PendingOutputCount;
 
+    internal int PendingHandshakeEgressIntentCount =>
+        _handshakeProcessor.PendingEgressIntentCount;
+
     internal int PendingBroadcastOutputCount => _relay.PendingBroadcastOutputCount;
 
     internal int PendingFetchOutputCount => _relay.PendingFetchOutputCount;
@@ -115,6 +120,45 @@ internal sealed class BsvPeerSessionFrameProcessor :
 
     internal OperationStatus StartFetch(in Hash256 transactionId) =>
         _relay.StartFetch(transactionId);
+
+    internal bool TryPeekHandshakeEgressIntent(out BsvHandshakeOutput output) =>
+        _handshakeProcessor.TryPeekEgressIntent(out output);
+
+    internal bool CanApplyHandshakeEgressCompletion(
+        in BsvPeerSessionEgressCompletion completion)
+    {
+        if (!_handshakeProcessor.TryPeekEgressIntent(out var intent) ||
+            completion.RelayWriteCommitKind != BsvPeerSessionRelayWriteCommitKind.None ||
+            completion.TransactionId != default ||
+            completion.Value != intent.Value)
+        {
+            return false;
+        }
+
+        return (intent.Kind, completion.SendKind) switch
+        {
+            (BsvHandshakeOutputKind.SendVersion, BsvPeerSessionSendKind.Version) => true,
+            (BsvHandshakeOutputKind.SendVerack, BsvPeerSessionSendKind.Verack) => true,
+            (BsvHandshakeOutputKind.SendProtoconf, BsvPeerSessionSendKind.Protoconf) => true,
+            (BsvHandshakeOutputKind.SendPong, BsvPeerSessionSendKind.Pong) => true,
+            (BsvHandshakeOutputKind.SendPing, BsvPeerSessionSendKind.Ping) => true,
+            _ => false,
+        };
+    }
+
+    internal OperationStatus ApplyHandshakeEgressCompletion(
+        in BsvPeerSessionEgressCompletion completion)
+    {
+        if (!CanApplyHandshakeEgressCompletion(completion) ||
+            !_handshakeProcessor.TryPeekEgressIntent(out var intent))
+        {
+            return OperationStatus.InvalidData;
+        }
+
+        return _handshakeProcessor.TryConsumeEgressIntent(intent)
+            ? OperationStatus.Done
+            : OperationStatus.InvalidData;
+    }
 
     internal bool CanPlanBroadcastEgress(in BsvTransactionBroadcastOutput output) =>
         _relay.CanPlanBroadcastEgress(output);
@@ -160,9 +204,7 @@ internal sealed class BsvPeerSessionFrameProcessor :
 
     internal void Terminate(BsvPeerSessionTerminationCause cause)
     {
-        Span<BsvHandshakeOutput> discardedHandshakeOutputs =
-            stackalloc BsvHandshakeOutput[BsvHandshakeStateMachine.MaximumOutputCount];
-        _ = _handshakeProcessor.DrainOutputs(discardedHandshakeOutputs, out _);
+        _handshakeProcessor.DiscardOutputsAndEgressIntents();
         _relay.Terminate(cause);
     }
 

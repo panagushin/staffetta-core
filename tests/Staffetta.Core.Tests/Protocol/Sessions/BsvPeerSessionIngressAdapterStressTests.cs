@@ -179,16 +179,49 @@ public sealed class BsvPeerSessionIngressAdapterStressTests
         Span<BsvHandshakeOutput> outputs = stackalloc BsvHandshakeOutput[3];
         Assert.AreEqual(OperationStatus.Done, session.DrainHandshakeOutputs(outputs, out var written));
         Assert.AreEqual(1, written);
+        CommitLocalVersionEgress(session);
 
         ConsumeWholeFrame(session, EncodeBasic("version"u8, CreateVersionPayload()));
         Assert.AreEqual(OperationStatus.Done, session.DrainHandshakeOutputs(outputs, out written));
         Assert.AreEqual(2, written);
+        Assert.AreEqual(OperationStatus.Done, session.PlanNextHandshakeEgress());
+        DrainEgress(session);
+        Assert.AreEqual(OperationStatus.Done, session.CommitEgressCompletion());
+        Assert.AreEqual(
+            OperationStatus.Done,
+            session.PlanProtoconfEgress(
+                checked((uint)MaximumPayloadLength),
+                default,
+                includeStreamPolicies: false));
+        DrainEgress(session);
+        Assert.AreEqual(OperationStatus.Done, session.CommitEgressCompletion());
 
         ConsumeWholeFrame(session, EncodeBasic("verack"u8, []));
         Assert.AreEqual(OperationStatus.Done, session.DrainHandshakeOutputs(outputs, out written));
         Assert.AreEqual(1, written);
         Assert.AreEqual(BsvHandshakeState.Ready, session.HandshakeState);
         return session;
+    }
+
+    private static void CommitLocalVersionEgress(BsvPeerSessionIngressAdapter session)
+    {
+        var encoded = CreateVersionPayload(LocalNonce);
+        Assert.AreEqual(
+            OperationStatus.Done,
+            VersionPayloadCodec.TryParse(encoded, out var version, out var consumed));
+        Assert.AreEqual(encoded.Length, consumed);
+        Assert.AreEqual(OperationStatus.Done, session.PlanVersionEgress(version));
+        DrainEgress(session);
+        Assert.AreEqual(OperationStatus.Done, session.CommitEgressCompletion());
+    }
+
+    private static void DrainEgress(BsvPeerSessionIngressAdapter session)
+    {
+        while (!session.PendingEgressSegment.IsEmpty)
+        {
+            var pending = session.PendingEgressSegment;
+            Assert.AreEqual(OperationStatus.Done, session.AcknowledgeEgress(pending, pending.Length));
+        }
     }
 
     private static void PrepareBroadcast(
@@ -463,7 +496,7 @@ public sealed class BsvPeerSessionIngressAdapterStressTests
             : status;
     }
 
-    private static byte[] CreateVersionPayload()
+    private static byte[] CreateVersionPayload(ulong nonce = PeerNonce)
     {
         Assert.IsTrue(NetworkAddress.TryCreateIpv4(1, [192, 0, 2, 1], 8_333, out var receiving));
         Assert.IsTrue(NetworkAddress.TryCreateIpv4(1, [192, 0, 2, 2], 8_333, out var source));
@@ -473,7 +506,7 @@ public sealed class BsvPeerSessionIngressAdapterStressTests
             timestampUnixSeconds: 1_788_131_200,
             receiving,
             source,
-            PeerNonce,
+            nonce,
             "/Staffetta:stress/"u8,
             startHeight: 948_321,
             relay: true);
