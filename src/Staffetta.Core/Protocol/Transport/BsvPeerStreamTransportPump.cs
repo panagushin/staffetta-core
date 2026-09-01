@@ -20,23 +20,10 @@ internal sealed class BsvPeerStreamTransportPump : IAsyncDisposable
     private readonly Stream _stream;
     private readonly BsvPeerSessionIngressAdapter _session;
     private readonly BsvPeerLocalHandshakeConfiguration _localHandshake;
-    private readonly IBsvPeerSessionFactSink _factSink;
     private readonly BsvPeerStreamTransportOptions _options;
     private readonly BsvPeerStreamIngressDriver _ingress;
     private readonly BsvPeerStreamEgressDriver _egress;
-    private readonly BsvHandshakeOutput[] _handshakeOutputs =
-        new BsvHandshakeOutput[BsvHandshakeStateMachine.MaximumOutputCount];
-    private readonly BsvTransactionBroadcastOutput[] _broadcastOutputs =
-        new BsvTransactionBroadcastOutput[BsvTransactionBroadcastStateMachine.MaximumOutputCount];
-    private readonly BsvTransactionFetchOutput[] _fetchOutputs =
-        new BsvTransactionFetchOutput[BsvTransactionFetchStateMachine.MaximumOutputCount];
-
-    private int _handshakeOutputIndex;
-    private int _handshakeOutputCount;
-    private int _broadcastOutputIndex;
-    private int _broadcastOutputCount;
-    private int _fetchOutputIndex;
-    private int _fetchOutputCount;
+    private readonly BsvPeerSessionOutputDispatcher _outputs;
     private bool _isStepping;
     private bool _dependencyReentryDetected;
     private bool _deferReentryUntilCommittedFactsDrain;
@@ -66,7 +53,7 @@ internal sealed class BsvPeerStreamTransportPump : IAsyncDisposable
         _stream = stream;
         _localHandshake = localHandshake ?? throw new ArgumentNullException(nameof(localHandshake));
         ArgumentNullException.ThrowIfNull(transactionSources);
-        _factSink = factSink ?? throw new ArgumentNullException(nameof(factSink));
+        ArgumentNullException.ThrowIfNull(factSink);
         _options = options ?? new BsvPeerStreamTransportOptions();
         _session = new BsvPeerSessionIngressAdapter(
             expectedNetworkMagic,
@@ -82,6 +69,7 @@ internal sealed class BsvPeerStreamTransportPump : IAsyncDisposable
             transactionSources,
             _options.TransactionBufferLength,
             _options.MaximumWriteLength);
+        _outputs = new BsvPeerSessionOutputDispatcher(_session, _localHandshake, factSink);
     }
 
     internal bool HasLocalWork =>
@@ -89,7 +77,7 @@ internal sealed class BsvPeerStreamTransportPump : IAsyncDisposable
         (_deferReentryUntilCommittedFactsDrain ||
             _session.HandshakeState == BsvHandshakeState.Terminal ||
             _ingress.HasBufferedInput ||
-            HasStagedOutputs ||
+            _outputs.HasStagedOutputs ||
             _session.HasPendingOutputs ||
             _session.PendingHandshakeEgressIntentCount != 0 ||
             _session.EgressState != BsvPeerSessionEgressState.Idle ||
@@ -206,14 +194,16 @@ internal sealed class BsvPeerStreamTransportPump : IAsyncDisposable
                     BsvPeerTransportTerminalReason.ProtocolViolation).ConfigureAwait(false);
             }
 
-            if (!HasStagedOutputs && _session.HasPendingOutputs && !TryStageOutputs())
+            if (!_outputs.HasStagedOutputs &&
+                _session.HasPendingOutputs &&
+                !_outputs.TryStageOutputs())
             {
                 return await TerminateAsync(
                     BsvPeerTransportStepKind.Faulted,
                     BsvPeerTransportTerminalReason.ProtocolViolation).ConfigureAwait(false);
             }
 
-            if (HasStagedOutputs)
+            if (_outputs.HasStagedOutputs)
             {
                 return await ProcessNextOutputAsync(cancellationToken).ConfigureAwait(false);
             }
@@ -260,11 +250,6 @@ internal sealed class BsvPeerStreamTransportPump : IAsyncDisposable
         await ReleaseResourcesAsync().ConfigureAwait(false);
     }
 
-    private bool HasStagedOutputs =>
-        _handshakeOutputIndex != _handshakeOutputCount ||
-        _broadcastOutputIndex != _broadcastOutputCount ||
-        _fetchOutputIndex != _fetchOutputCount;
-
     private bool CanStartCommand() =>
         !_isStepping &&
         !_isTerminal &&
@@ -272,159 +257,46 @@ internal sealed class BsvPeerStreamTransportPump : IAsyncDisposable
         !_deferReentryUntilCommittedFactsDrain &&
         !_ingress.HasBufferedInput &&
         !_ingress.IsFramePartial &&
-        !HasStagedOutputs &&
+        !_outputs.HasStagedOutputs &&
         !_session.HasPendingOutputs &&
         _session.PendingHandshakeEgressIntentCount == 0 &&
         _session.EgressState == BsvPeerSessionEgressState.Idle &&
         !_egress.HasTransactionSource;
 
-    private bool TryStageOutputs()
-    {
-        if (HasStagedOutputs)
-        {
-            return true;
-        }
-
-        if (_session.PendingHandshakeOutputCount != 0)
-        {
-            var status = _session.DrainHandshakeOutputs(_handshakeOutputs, out _handshakeOutputCount);
-            _handshakeOutputIndex = 0;
-            return status == OperationStatus.Done;
-        }
-
-        if (_session.PendingBroadcastOutputCount != 0)
-        {
-            var status = _session.DrainBroadcastOutputs(_broadcastOutputs, out _broadcastOutputCount);
-            _broadcastOutputIndex = 0;
-            return status == OperationStatus.Done;
-        }
-
-        if (_session.PendingFetchOutputCount != 0)
-        {
-            var status = _session.DrainFetchOutputs(_fetchOutputs, out _fetchOutputCount);
-            _fetchOutputIndex = 0;
-            return status == OperationStatus.Done;
-        }
-
-        return !_session.HasPendingOutputs;
-    }
-
     private async ValueTask<BsvPeerTransportStepResult> ProcessNextOutputAsync(
         CancellationToken cancellationToken)
     {
-        if (_handshakeOutputIndex != _handshakeOutputCount)
+        var dispatch = _outputs.DispatchNext();
+        if (dispatch.Kind == BsvPeerSessionOutputDispatchKind.FactPending)
         {
-            var output = _handshakeOutputs[_handshakeOutputIndex];
-            if (IsHandshakeFact(output.Kind))
+            try
             {
-                try
+                await _outputs.DeliverFactAsync(dispatch).ConfigureAwait(false);
+                if (_dependencyReentryDetected)
                 {
-                    await _factSink.OnHandshakeFactAsync(output, CancellationToken.None).ConfigureAwait(false);
-                    if (_dependencyReentryDetected)
-                    {
-                        return await TerminateForReentryAsync().ConfigureAwait(false);
-                    }
+                    return await TerminateForReentryAsync().ConfigureAwait(false);
                 }
-                catch
-                {
-                    return await TerminateAsync(
-                        BsvPeerTransportStepKind.Faulted,
-                        BsvPeerTransportTerminalReason.FactSinkFailure).ConfigureAwait(false);
-                }
-
-                AdvanceHandshakeOutput();
-                return BsvPeerTransportStepResult.Progress;
+            }
+            catch
+            {
+                return await TerminateAsync(
+                    BsvPeerTransportStepKind.Faulted,
+                    BsvPeerTransportTerminalReason.FactSinkFailure).ConfigureAwait(false);
             }
 
-            OperationStatus status;
-            if (output.Kind == BsvHandshakeOutputKind.SendVersion)
-            {
-                status = _session.PlanVersionEgress(_localHandshake.CreateVersionPayload());
-            }
-            else if (output.Kind == BsvHandshakeOutputKind.SendProtoconf)
-            {
-                status = _session.PlanProtoconfEgress(
-                    _localHandshake.MaximumReceivePayloadLength,
-                    _localHandshake.StreamPolicies,
-                    _localHandshake.IncludeStreamPolicies);
-            }
-            else
-            {
-                status = _session.PlanNextHandshakeEgress();
-            }
-
-            if (status != OperationStatus.Done)
+            if (!_outputs.TryCommit(dispatch))
             {
                 return await TerminateAsync(
                     BsvPeerTransportStepKind.Faulted,
                     BsvPeerTransportTerminalReason.ProtocolViolation).ConfigureAwait(false);
             }
 
-            AdvanceHandshakeOutput();
             return BsvPeerTransportStepResult.Progress;
         }
 
-        if (_broadcastOutputIndex != _broadcastOutputCount)
+        if (dispatch.Kind == BsvPeerSessionOutputDispatchKind.TransactionRequested)
         {
-            return await ProcessBroadcastOutputAsync(
-                _broadcastOutputs[_broadcastOutputIndex],
-                cancellationToken).ConfigureAwait(false);
-        }
-
-        var fetchOutput = _fetchOutputs[_fetchOutputIndex];
-        if (fetchOutput.Kind == BsvTransactionFetchOutputKind.SendGetData)
-        {
-            var status = _session.PlanFetchEgress(fetchOutput, out var disposition);
-            if (status != OperationStatus.Done || disposition != BsvPeerSessionOutputDisposition.Send)
-            {
-                return await TerminateAsync(
-                    BsvPeerTransportStepKind.Faulted,
-                    BsvPeerTransportTerminalReason.ProtocolViolation).ConfigureAwait(false);
-            }
-
-            AdvanceFetchOutput();
-            return BsvPeerTransportStepResult.Progress;
-        }
-
-        try
-        {
-            await _factSink.OnFetchFactAsync(fetchOutput, CancellationToken.None).ConfigureAwait(false);
-            if (_dependencyReentryDetected)
-            {
-                return await TerminateForReentryAsync().ConfigureAwait(false);
-            }
-        }
-        catch
-        {
-            return await TerminateAsync(
-                BsvPeerTransportStepKind.Faulted,
-                BsvPeerTransportTerminalReason.FactSinkFailure).ConfigureAwait(false);
-        }
-
-        AdvanceFetchOutput();
-        return BsvPeerTransportStepResult.Progress;
-    }
-
-    private async ValueTask<BsvPeerTransportStepResult> ProcessBroadcastOutputAsync(
-        BsvTransactionBroadcastOutput output,
-        CancellationToken cancellationToken)
-    {
-        if (output.Kind == BsvTransactionBroadcastOutputKind.SendInventory)
-        {
-            var status = _session.PlanBroadcastEgress(output, out var disposition);
-            if (status != OperationStatus.Done || disposition != BsvPeerSessionOutputDisposition.Send)
-            {
-                return await TerminateAsync(
-                    BsvPeerTransportStepKind.Faulted,
-                    BsvPeerTransportTerminalReason.ProtocolViolation).ConfigureAwait(false);
-            }
-
-            AdvanceBroadcastOutput();
-            return BsvPeerTransportStepResult.Progress;
-        }
-
-        if (output.Kind == BsvTransactionBroadcastOutputKind.SendTransaction)
-        {
+            var output = dispatch.TransactionRequest;
             bool hasSource;
             try
             {
@@ -500,26 +372,23 @@ internal sealed class BsvPeerStreamTransportPump : IAsyncDisposable
                     BsvPeerTransportTerminalReason.TransactionSourceContractViolation).ConfigureAwait(false);
             }
 
-            AdvanceBroadcastOutput();
+            if (!_outputs.TryCommit(dispatch))
+            {
+                return await TerminateAsync(
+                    BsvPeerTransportStepKind.Faulted,
+                    BsvPeerTransportTerminalReason.ProtocolViolation).ConfigureAwait(false);
+            }
+
             return BsvPeerTransportStepResult.Progress;
         }
 
-        try
-        {
-            await _factSink.OnBroadcastFactAsync(output, CancellationToken.None).ConfigureAwait(false);
-            if (_dependencyReentryDetected)
-            {
-                return await TerminateForReentryAsync().ConfigureAwait(false);
-            }
-        }
-        catch
+        if (dispatch.Kind == BsvPeerSessionOutputDispatchKind.InvalidData)
         {
             return await TerminateAsync(
                 BsvPeerTransportStepKind.Faulted,
-                BsvPeerTransportTerminalReason.FactSinkFailure).ConfigureAwait(false);
+                BsvPeerTransportTerminalReason.ProtocolViolation).ConfigureAwait(false);
         }
 
-        AdvanceBroadcastOutput();
         return BsvPeerTransportStepResult.Progress;
     }
 
@@ -607,7 +476,7 @@ internal sealed class BsvPeerStreamTransportPump : IAsyncDisposable
         var status = await _egress.CommitAsync(_session).ConfigureAwait(false);
         if (status == OperationStatus.DestinationTooSmall)
         {
-            return TryStageOutputs()
+            return _outputs.TryStageOutputs()
                 ? BsvPeerTransportStepResult.Progress
                 : await TerminateAsync(
                     BsvPeerTransportStepKind.Faulted,
@@ -672,7 +541,7 @@ internal sealed class BsvPeerStreamTransportPump : IAsyncDisposable
 
             if (_session.HasPendingOutputs || _session.PendingHandshakeEgressIntentCount != 0)
             {
-                if (_session.HasPendingOutputs && !TryStageOutputs())
+                if (_session.HasPendingOutputs && !_outputs.TryStageOutputs())
                 {
                     return await TerminateAsync(
                         BsvPeerTransportStepKind.Faulted,
@@ -807,41 +676,6 @@ internal sealed class BsvPeerStreamTransportPump : IAsyncDisposable
             }
         }
     }
-
-    private void AdvanceHandshakeOutput()
-    {
-        _handshakeOutputs[_handshakeOutputIndex++] = default;
-        if (_handshakeOutputIndex == _handshakeOutputCount)
-        {
-            _handshakeOutputIndex = 0;
-            _handshakeOutputCount = 0;
-        }
-    }
-
-    private void AdvanceBroadcastOutput()
-    {
-        _broadcastOutputs[_broadcastOutputIndex++] = default;
-        if (_broadcastOutputIndex == _broadcastOutputCount)
-        {
-            _broadcastOutputIndex = 0;
-            _broadcastOutputCount = 0;
-        }
-    }
-
-    private void AdvanceFetchOutput()
-    {
-        _fetchOutputs[_fetchOutputIndex++] = default;
-        if (_fetchOutputIndex == _fetchOutputCount)
-        {
-            _fetchOutputIndex = 0;
-            _fetchOutputCount = 0;
-        }
-    }
-
-    private static bool IsHandshakeFact(BsvHandshakeOutputKind kind) => kind is
-        BsvHandshakeOutputKind.BecameReady or
-        BsvHandshakeOutputKind.PingAcknowledged or
-        BsvHandshakeOutputKind.ForwardReject;
 
     private bool RejectCommandReentry()
     {
