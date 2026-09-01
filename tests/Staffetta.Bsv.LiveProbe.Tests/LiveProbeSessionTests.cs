@@ -161,9 +161,10 @@ public sealed class LiveProbeSessionTests
                 DateTimeOffset.UnixEpoch,
                 new Dictionary<string, long>(StringComparer.Ordinal),
                 cancellation.Token);
-            await peer.ReadEntered;
+            await peer.ReadEntered.WaitAsync(TimeSpan.FromSeconds(5));
             cancellation.Cancel();
-            await Assert.ThrowsExceptionAsync<TimeoutException>(async () => await run);
+            await Assert.ThrowsExceptionAsync<TimeoutException>(async () =>
+                await run.WaitAsync(TimeSpan.FromSeconds(5)));
 
             Assert.IsFalse(Directory.Exists(output));
             Assert.IsTrue(Directory.Exists(output + ".part"));

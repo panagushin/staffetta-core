@@ -7,6 +7,32 @@ using Staffetta.Core.Protocol.Wire;
 
 namespace Staffetta.Bsv.Cli.Tests;
 
+internal class ThreadSafeStringWriter : StringWriter
+{
+    private readonly object _gate = new();
+
+    public override Task WriteLineAsync(
+        ReadOnlyMemory<char> buffer,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        lock (_gate)
+        {
+            base.WriteLine(buffer.Span);
+        }
+
+        return Task.CompletedTask;
+    }
+
+    public override string ToString()
+    {
+        lock (_gate)
+        {
+            return base.ToString();
+        }
+    }
+}
+
 internal sealed class FakePeerConnector : IPeerConnector
 {
     private readonly Func<CancellationToken, ValueTask<IPeerConnection>> _connect;

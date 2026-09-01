@@ -7,4 +7,9 @@ solution="$repository_root/Staffetta.Core.slnx"
 
 dotnet restore "$solution"
 dotnet build "$solution" --configuration Release --no-restore
-dotnet test "$solution" --configuration Release --no-build --no-restore
+dotnet test "$solution" --configuration Release --no-build --no-restore \
+  --filter "TestCategory!=AllocationEvidence" \
+  --blame-hang --blame-hang-timeout 30s --blame-hang-dump-type mini
+dotnet test "$repository_root/tests/Staffetta.Core.Tests/Staffetta.Core.Tests.csproj" \
+  --configuration Release --no-build --no-restore \
+  --filter "TestCategory=AllocationEvidence"

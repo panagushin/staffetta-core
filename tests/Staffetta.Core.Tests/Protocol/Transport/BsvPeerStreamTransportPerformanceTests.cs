@@ -14,6 +14,7 @@ public sealed class BsvPeerStreamTransportPerformanceTests
     private static readonly byte[] LargePayload = CreatePayload(8 * 1024 * 1024);
 
     [TestMethod]
+    [TestCategory("AllocationEvidence")]
     public async Task TransactionCompletionAllocationDoesNotScaleWithPayloadChunks()
     {
 #if DEBUG
@@ -51,6 +52,7 @@ public sealed class BsvPeerStreamTransportPerformanceTests
     }
 
     [TestMethod]
+    [TestCategory("AllocationEvidence")]
     public async Task AllocationHarnessDetectsAControlSourceThatAllocatesPerChunk()
     {
 #if DEBUG

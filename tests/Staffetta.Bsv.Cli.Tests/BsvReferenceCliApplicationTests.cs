@@ -61,7 +61,7 @@ public sealed class BsvReferenceCliApplicationTests
                 },
                 new TestRuntime(),
                 output,
-                new StringWriter(),
+                new ThreadSafeStringWriter(),
                 CancellationToken.None);
 
             Assert.AreEqual(CliExitCode.Success, exit);
@@ -90,7 +90,7 @@ public sealed class BsvReferenceCliApplicationTests
         try
         {
             var connectorFactoryCalls = 0;
-            var output = new StringWriter();
+            var output = new ThreadSafeStringWriter();
             var arguments = new CliArguments(
                 ReferenceCliCommand.PrepareBroadcast,
                 default,
@@ -107,7 +107,7 @@ public sealed class BsvReferenceCliApplicationTests
                 },
                 new TestRuntime(),
                 output,
-                new StringWriter(),
+                new ThreadSafeStringWriter(),
                 CancellationToken.None);
 
             Assert.AreEqual(CliExitCode.TransactionInput, exit);
@@ -127,8 +127,8 @@ public sealed class BsvReferenceCliApplicationTests
         try
         {
             var connectorFactoryCalls = 0;
-            var output = new StringWriter();
-            var error = new StringWriter();
+            var output = new ThreadSafeStringWriter();
+            var error = new ThreadSafeStringWriter();
             var arguments = new CliArguments(
                 ReferenceCliCommand.Broadcast,
                 new PeerEndpoint("node.example", 8333),
@@ -165,7 +165,7 @@ public sealed class BsvReferenceCliApplicationTests
     {
         var connection = new FakePeerConnection([]);
         var connector = new FakePeerConnector(connection);
-        var output = new StringWriter();
+        var output = new ThreadSafeStringWriter();
         var runtime = new TestRuntime(TestRuntime.Infinite, TestRuntime.Immediate);
         var application = CreateApplication(connector, output, runtime);
 
@@ -184,17 +184,17 @@ public sealed class BsvReferenceCliApplicationTests
     public async Task OperatorCancellationWinsBeforeForcedClose()
     {
         var connection = new FakePeerConnection([]);
-        var output = new StringWriter();
+        var output = new ThreadSafeStringWriter();
         var application = CreateApplication(
             new FakePeerConnector(connection),
             output,
             new TestRuntime());
         using var cancellation = new CancellationTokenSource();
         var running = application.RunAsync(CreateHandshakeArguments(), cancellation.Token).AsTask();
-        await connection.PeerStream.ReadPending;
+        await connection.PeerStream.ReadPending.WaitAsync(TimeSpan.FromSeconds(5));
 
         cancellation.Cancel();
-        var exit = await running;
+        var exit = await running.WaitAsync(TimeSpan.FromSeconds(5));
 
         Assert.AreEqual(CliExitCode.Canceled, exit);
         Assert.AreEqual(1, connection.AbortCount);
@@ -206,7 +206,7 @@ public sealed class BsvReferenceCliApplicationTests
     public async Task EofBeforeReadyIsATruthfulPeerSessionFailure()
     {
         var connection = new FakePeerConnection([], endWithEof: true);
-        var output = new StringWriter();
+        var output = new ThreadSafeStringWriter();
         var application = CreateApplication(
             new FakePeerConnector(connection),
             output,
@@ -225,7 +225,7 @@ public sealed class BsvReferenceCliApplicationTests
     public async Task PeerRejectIsReportedByTheExactHandshakeTerminalReason()
     {
         var connection = new FakePeerConnection(PeerFrames.Rejected());
-        var output = new StringWriter();
+        var output = new ThreadSafeStringWriter();
         var application = CreateApplication(
             new FakePeerConnector(connection),
             output,
@@ -248,14 +248,14 @@ public sealed class BsvReferenceCliApplicationTests
         var connector = new FakePeerConnector(_ => new ValueTask<IPeerConnection>(late.Task));
         var application = CreateApplication(
             connector,
-            new StringWriter(),
+            new ThreadSafeStringWriter(),
             new TestRuntime(TestRuntime.Immediate));
 
         var exit = await application.RunAsync(CreateHandshakeArguments(), CancellationToken.None);
 
         Assert.AreEqual(CliExitCode.Timeout, exit);
         late.SetResult(connection);
-        await connection.Disposed;
+        await connection.Disposed.WaitAsync(TimeSpan.FromSeconds(5));
 
         Assert.AreEqual(1, connection.AbortCount);
         Assert.AreEqual(1, connection.DisposeCount);
@@ -303,7 +303,7 @@ public sealed class BsvReferenceCliApplicationTests
     public async Task FaultedHandshakeDelayPreservesInternalFailureAndCleansUp()
     {
         var connection = new FakePeerConnection([]);
-        var output = new StringWriter();
+        var output = new ThreadSafeStringWriter();
         var runtime = new TestRuntime(
             TestRuntime.Infinite,
             _ => Task.FromException(new InvalidOperationException("clock")));
@@ -321,7 +321,7 @@ public sealed class BsvReferenceCliApplicationTests
     public async Task FaultedConnectDelayDisposesSimultaneousSuccessfulConnection()
     {
         var connection = new FakePeerConnection([]);
-        var output = new StringWriter();
+        var output = new ThreadSafeStringWriter();
         var application = CreateApplication(
             new FakePeerConnector(connection),
             output,
@@ -345,7 +345,7 @@ public sealed class BsvReferenceCliApplicationTests
             cancellation.Cancel();
             return ValueTask.FromResult<IPeerConnection>(connection);
         });
-        var output = new StringWriter();
+        var output = new ThreadSafeStringWriter();
         var application = CreateApplication(connector, output, new TestRuntime());
 
         var exit = await application.RunAsync(CreateHandshakeArguments(), cancellation.Token);
@@ -363,7 +363,7 @@ public sealed class BsvReferenceCliApplicationTests
         IPeerConnector connector,
         TextWriter output,
         IReferenceCliRuntime runtime) =>
-        new(connector, runtime, output, new StringWriter());
+        new(connector, runtime, output, new ThreadSafeStringWriter());
 
     private static CliArguments CreateHandshakeArguments() =>
         new(

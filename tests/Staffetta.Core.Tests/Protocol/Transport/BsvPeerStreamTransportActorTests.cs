@@ -27,11 +27,11 @@ public sealed class BsvPeerStreamTransportActorTests
 
         Assert.AreEqual(
             BsvPeerTransportCommandApplicationKind.PumpApplied,
-            (await submission.Application).Kind);
+            (await submission.Application.WaitAsync(TimeSpan.FromSeconds(5))).Kind);
         Assert.AreEqual(1, facts.BecameReadyCount);
         await WaitUntilAsync(() => facts.AnnouncedCount == 1);
         await actor.StopAsync();
-        var completion = await run;
+        var completion = await run.WaitAsync(TimeSpan.FromSeconds(5));
         Assert.AreEqual(BsvPeerTransportActorCompletionKind.Stopped, completion.Kind);
     }
 
@@ -55,7 +55,7 @@ public sealed class BsvPeerStreamTransportActorTests
             (await queued.Application).Kind);
         Assert.AreEqual(1, facts.BecameReadyCount);
         await actor.StopAsync();
-        await run;
+        await run.WaitAsync(TimeSpan.FromSeconds(5));
     }
 
     [TestMethod]
@@ -73,7 +73,7 @@ public sealed class BsvPeerStreamTransportActorTests
         var submission = actor.QueueBroadcast(transactionId);
 
         Assert.AreEqual(BsvPeerTransportCommandQueueStatus.Accepted, submission.Status);
-        var application = await submission.Application!;
+        var application = await submission.Application!.WaitAsync(TimeSpan.FromSeconds(5));
         Assert.AreEqual(BsvPeerTransportCommandApplicationKind.PumpApplied, application.Kind);
         await WaitUntilAsync(() => facts.AnnouncedCount == 1);
         Assert.IsTrue(stream.WrittenByteCount > writtenBefore);
@@ -81,7 +81,7 @@ public sealed class BsvPeerStreamTransportActorTests
         Assert.AreEqual(cancellationsBefore, stream.ReadCancellationCount);
 
         await actor.StopAsync();
-        await run;
+        await run.WaitAsync(TimeSpan.FromSeconds(5));
     }
 
     [TestMethod]
@@ -102,7 +102,7 @@ public sealed class BsvPeerStreamTransportActorTests
         Assert.AreEqual(BsvPeerTransportCommandQueueStatus.Accepted, submission.Status);
         Assert.AreEqual(
             BsvPeerTransportCommandApplicationKind.PumpApplied,
-            (await submission.Application!).Kind);
+            (await submission.Application!.WaitAsync(TimeSpan.FromSeconds(5))).Kind);
         await WaitUntilAsync(() => facts.AnnouncedCount == 1 && stream.PendingReadCount == 1);
 
         var commands = ReadCommands(stream.WrittenBytes);
@@ -112,7 +112,7 @@ public sealed class BsvPeerStreamTransportActorTests
         Assert.AreEqual(1, stream.CompletedInjectedReadCount);
 
         await actor.StopAsync();
-        await run;
+        await run.WaitAsync(TimeSpan.FromSeconds(5));
     }
 
     [TestMethod]
@@ -143,7 +143,7 @@ public sealed class BsvPeerStreamTransportActorTests
         Assert.AreEqual(BsvPeerTransportCommandQueueStatus.Accepted, submission.Status);
         Assert.AreEqual(
             BsvPeerTransportCommandApplicationKind.PumpApplied,
-            (await submission.Application!).Kind);
+            (await submission.Application!.WaitAsync(TimeSpan.FromSeconds(5))).Kind);
         await WaitUntilAsync(() => facts.AnnouncedCount == 1 && stream.PendingReadCount == 1);
 
         var commands = ReadCommands(stream.WrittenBytes);
@@ -154,7 +154,9 @@ public sealed class BsvPeerStreamTransportActorTests
         Assert.AreEqual(1, facts.AnnouncedCount);
 
         await actor.StopAsync();
-        Assert.AreEqual(BsvPeerTransportActorCompletionKind.Stopped, (await run).Kind);
+        Assert.AreEqual(
+            BsvPeerTransportActorCompletionKind.Stopped,
+            (await run.WaitAsync(TimeSpan.FromSeconds(5))).Kind);
     }
 
     [TestMethod]
@@ -189,7 +191,7 @@ public sealed class BsvPeerStreamTransportActorTests
                 (await application).Kind);
         }
 
-        await run;
+        await run.WaitAsync(TimeSpan.FromSeconds(5));
         Assert.AreEqual(1, stream.DisposeCount);
     }
 
@@ -212,7 +214,7 @@ public sealed class BsvPeerStreamTransportActorTests
             CancellationToken.None,
             TaskContinuationOptions.ExecuteSynchronously,
             TaskScheduler.Default);
-        var applied = await submission.Application;
+        var applied = await submission.Application.WaitAsync(TimeSpan.FromSeconds(5));
         Assert.AreEqual(BsvPeerTransportCommandApplicationKind.PumpApplied, applied.Kind);
         Assert.AreEqual(0, facts.AnnouncedCount);
         Assert.AreEqual(
@@ -222,7 +224,7 @@ public sealed class BsvPeerStreamTransportActorTests
         await WaitUntilAsync(() => facts.AnnouncedCount == 1);
 
         await actor.StopAsync();
-        await run;
+        await run.WaitAsync(TimeSpan.FromSeconds(5));
     }
 
     [TestMethod]
@@ -245,7 +247,7 @@ public sealed class BsvPeerStreamTransportActorTests
         Assert.AreEqual(
             BsvPeerTransportCommandQueueStatus.Stopped,
             actor.QueueFetch(Hash256.DoubleSha256("after-stop"u8)).Status);
-        await run;
+        await run.WaitAsync(TimeSpan.FromSeconds(5));
         Assert.AreEqual(1, stream.DisposeCount);
         Assert.AreEqual(1, stream.ReadCancellationCount);
     }
@@ -289,7 +291,7 @@ public sealed class BsvPeerStreamTransportActorTests
         Assert.AreEqual(
             BsvPeerTransportCommandApplicationKind.PumpApplied,
             (await queued.Application!).Kind);
-        await run;
+        await run.WaitAsync(TimeSpan.FromSeconds(5));
 
         Assert.AreEqual(1, facts.AnnouncedCount);
         Assert.AreEqual(2, stream.ObservedWriteCount);
@@ -318,7 +320,7 @@ public sealed class BsvPeerStreamTransportActorTests
         Assert.AreEqual(
             BsvPeerTransportCommandApplicationKind.PumpApplied,
             (await queued.Application!).Kind);
-        await run;
+        await run.WaitAsync(TimeSpan.FromSeconds(5));
 
         Assert.AreEqual(0, facts.AnnouncedCount);
         Assert.AreEqual(1, stream.ObservedWriteCount);
@@ -438,7 +440,7 @@ public sealed class BsvPeerStreamTransportActorTests
         await WaitUntilAsync(() => facts.BecameReadyCount == 1 && stream.PendingReadCount == 1);
 
         stream.CompletePendingReadAsPeerEnd();
-        var completion = await run;
+        var completion = await run.WaitAsync(TimeSpan.FromSeconds(5));
 
         Assert.AreEqual(BsvPeerTransportActorCompletionKind.TransportTerminal, completion.Kind);
         Assert.AreEqual(BsvPeerTransportStepKind.PeerClosed, completion.TransportResult.Kind);
@@ -457,7 +459,7 @@ public sealed class BsvPeerStreamTransportActorTests
         await WaitUntilAsync(() => facts.BecameReadyCount == 1 && stream.PendingReadCount == 1);
 
         stream.FailPendingRead(new IOException("Injected actor read failure."));
-        var completion = await run;
+        var completion = await run.WaitAsync(TimeSpan.FromSeconds(5));
 
         Assert.AreEqual(BsvPeerTransportActorCompletionKind.TransportTerminal, completion.Kind);
         Assert.AreEqual(BsvPeerTransportStepKind.Faulted, completion.TransportResult.Kind);
@@ -481,8 +483,8 @@ public sealed class BsvPeerStreamTransportActorTests
         var stop = actor.StopAsync().AsTask();
         await stream.CancellationObserved.WaitAsync(TimeSpan.FromSeconds(5));
         stream.CompletePendingReadAsPeerEnd();
-        var completion = await run;
-        await stop;
+        var completion = await run.WaitAsync(TimeSpan.FromSeconds(5));
+        await stop.WaitAsync(TimeSpan.FromSeconds(5));
 
         Assert.AreEqual(BsvPeerTransportActorCompletionKind.TransportTerminal, completion.Kind);
         Assert.AreEqual(BsvPeerTransportStepKind.PeerClosed, completion.TransportResult.Kind);
@@ -506,8 +508,8 @@ public sealed class BsvPeerStreamTransportActorTests
         var stop = actor.StopAsync().AsTask();
         await stream.CancellationObserved.WaitAsync(TimeSpan.FromSeconds(5));
         stream.FailPendingRead(new IOException("Injected stop-race read failure."));
-        var completion = await run;
-        await stop;
+        var completion = await run.WaitAsync(TimeSpan.FromSeconds(5));
+        await stop.WaitAsync(TimeSpan.FromSeconds(5));
 
         Assert.AreEqual(BsvPeerTransportActorCompletionKind.TransportTerminal, completion.Kind);
         Assert.AreEqual(BsvPeerTransportStepKind.Faulted, completion.TransportResult.Kind);
@@ -533,7 +535,7 @@ public sealed class BsvPeerStreamTransportActorTests
         await WaitUntilAsync(() => stream.WriteStartedCount == 1);
 
         await actor.StopAsync();
-        var completion = await run;
+        var completion = await run.WaitAsync(TimeSpan.FromSeconds(5));
 
         Assert.AreEqual(BsvPeerTransportActorCompletionKind.Stopped, completion.Kind);
         Assert.AreEqual(0, facts.AnnouncedCount);
@@ -564,7 +566,7 @@ public sealed class BsvPeerStreamTransportActorTests
         await source.ReadStarted.WaitAsync(TimeSpan.FromSeconds(5));
 
         await actor.StopAsync();
-        var completion = await run;
+        var completion = await run.WaitAsync(TimeSpan.FromSeconds(5));
 
         Assert.AreEqual(BsvPeerTransportActorCompletionKind.Stopped, completion.Kind);
         Assert.AreEqual(0, facts.SentToPeerCount);

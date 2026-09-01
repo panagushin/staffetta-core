@@ -44,7 +44,7 @@ public sealed class BroadcastCommandTests
                 new FakePeerConnector(connection),
                 new TestRuntime(),
                 output,
-                new StringWriter());
+                new ThreadSafeStringWriter());
 
             var running = application.RunBroadcastAsync(
                 CreateArguments(path),
@@ -54,7 +54,7 @@ public sealed class BroadcastCommandTests
             connection.PeerStream.AppendInput(PeerFrames.Inventory("getdata", prepared.TransactionId));
             await WaitUntilAsync(() => HasOutboundCommand(connection, "tx"));
             connection.PeerStream.AppendInput(PeerFrames.Inventory("inv", prepared.TransactionId));
-            var exit = await running;
+            var exit = await running.WaitAsync(TimeSpan.FromSeconds(5));
 
             Assert.AreEqual(CliExitCode.Success, exit);
             CollectionAssert.AreEqual(
@@ -102,7 +102,7 @@ public sealed class BroadcastCommandTests
                 new FakePeerConnector(connection),
                 new TestRuntime(),
                 output,
-                new StringWriter());
+                new ThreadSafeStringWriter());
 
             var running = application.RunBroadcastAsync(
                 CreateArguments(path),
@@ -118,7 +118,7 @@ public sealed class BroadcastCommandTests
                 StringComparison.Ordinal));
             connection.PeerStream.AppendInput(PeerFrames.Inventory("inv", prepared.TransactionId));
 
-            var exit = await running;
+            var exit = await running.WaitAsync(TimeSpan.FromSeconds(5));
 
             Assert.AreEqual(CliExitCode.Success, exit);
             var monetaryLine = Lines(output).Single(static line =>
@@ -144,12 +144,12 @@ public sealed class BroadcastCommandTests
         {
             await using var prepared = await PreparedBinaryTransaction.OpenAndValidateAsync(path, CancellationToken.None);
             var connection = new FakePeerConnection(PeerFrames.Ready());
-            var output = new StringWriter();
+            var output = new ThreadSafeStringWriter();
             var application = new BsvReferenceCliApplication(
                 new FakePeerConnector(connection),
                 new TestRuntime(),
                 output,
-                new StringWriter());
+                new ThreadSafeStringWriter());
 
             var running = application.RunBroadcastAsync(
                 CreateArguments(path),
@@ -159,7 +159,7 @@ public sealed class BroadcastCommandTests
             connection.PeerStream.AppendInput(PeerFrames.Inventory("getdata", prepared.TransactionId));
             await WaitUntilAsync(() => HasOutboundCommand(connection, "tx"));
             connection.PeerStream.AppendInput(PeerFrames.TransactionReject(prepared.TransactionId));
-            var exit = await running;
+            var exit = await running.WaitAsync(TimeSpan.FromSeconds(5));
 
             Assert.AreEqual(CliExitCode.PeerSessionFailure, exit);
             CollectionAssert.Contains(ReadFacts(output), BsvTransactionBroadcastOutputKind.SentToPeer.ToString());
@@ -183,13 +183,13 @@ public sealed class BroadcastCommandTests
         {
             await using var prepared = await PreparedBinaryTransaction.OpenAndValidateAsync(path, CancellationToken.None);
             var connection = new FakePeerConnection(PeerFrames.Ready());
-            var output = new StringWriter();
+            var output = new ThreadSafeStringWriter();
             var deliveryDeadline = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             var application = new BsvReferenceCliApplication(
                 new FakePeerConnector(connection),
                 new TestRuntime(TestRuntime.Infinite, TestRuntime.Infinite, _ => deliveryDeadline.Task),
                 output,
-                new StringWriter());
+                new ThreadSafeStringWriter());
 
             var running = application.RunBroadcastAsync(
                 CreateArguments(path),
@@ -197,7 +197,7 @@ public sealed class BroadcastCommandTests
                 CancellationToken.None).AsTask();
             await WaitUntilAsync(() => output.ToString().Contains("\"fact\":\"Announced\"", StringComparison.Ordinal));
             deliveryDeadline.SetResult();
-            var exit = await running;
+            var exit = await running.WaitAsync(TimeSpan.FromSeconds(5));
 
             Assert.AreEqual(CliExitCode.Timeout, exit);
             CollectionAssert.AreEqual(
@@ -222,20 +222,20 @@ public sealed class BroadcastCommandTests
         {
             await using var prepared = await PreparedBinaryTransaction.OpenAndValidateAsync(path, CancellationToken.None);
             var connection = new FakePeerConnection(PeerFrames.Ready());
-            var output = new StringWriter();
+            var output = new ThreadSafeStringWriter();
             var deliveryDeadline = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             var application = new BsvReferenceCliApplication(
                 new FakePeerConnector(connection),
                 new TestRuntime(TestRuntime.Infinite, TestRuntime.Infinite, _ => deliveryDeadline.Task),
                 output,
-                new StringWriter());
+                new ThreadSafeStringWriter());
 
             var running = application.RunBroadcastAsync(CreateArguments(path), prepared, CancellationToken.None).AsTask();
             await WaitUntilAsync(() => HasOutboundCommand(connection, "inv"));
             connection.PeerStream.AppendInput(PeerFrames.Inventory("inv", prepared.TransactionId));
             await WaitUntilAsync(() => output.ToString().Contains("ObservedFromPeer", StringComparison.Ordinal));
             deliveryDeadline.SetResult();
-            var exit = await running;
+            var exit = await running.WaitAsync(TimeSpan.FromSeconds(5));
 
             Assert.AreEqual(CliExitCode.Timeout, exit);
             CollectionAssert.Contains(
@@ -260,7 +260,7 @@ public sealed class BroadcastCommandTests
         {
             await using var prepared = await PreparedBinaryTransaction.OpenAndValidateAsync(path, CancellationToken.None);
             var connection = new FakePeerConnection(PeerFrames.Ready());
-            var output = new StringWriter();
+            var output = new ThreadSafeStringWriter();
             var application = new BsvReferenceCliApplication(
                 new FakePeerConnector(connection),
                 new TestRuntime(
@@ -269,12 +269,12 @@ public sealed class BroadcastCommandTests
                     TestRuntime.Infinite,
                     TestRuntime.Immediate),
                 output,
-                new StringWriter());
+                new ThreadSafeStringWriter());
 
             var running = application.RunBroadcastAsync(CreateArguments(path), prepared, CancellationToken.None).AsTask();
             await WaitUntilAsync(() => HasOutboundCommand(connection, "inv"));
             connection.PeerStream.AppendInput(PeerFrames.Inventory("getdata", prepared.TransactionId));
-            var exit = await running;
+            var exit = await running.WaitAsync(TimeSpan.FromSeconds(5));
 
             Assert.AreEqual(CliExitCode.Success, exit);
             CollectionAssert.Contains(ReadFacts(output), BsvTransactionBroadcastOutputKind.SentToPeer.ToString());
@@ -308,8 +308,8 @@ public sealed class BroadcastCommandTests
                     throw new AssertFailedException("network capability constructed");
                 },
                 new TestRuntime(),
-                new StringWriter(),
-                new StringWriter(),
+                new ThreadSafeStringWriter(),
+                new ThreadSafeStringWriter(),
                 CancellationToken.None);
 
             Assert.AreEqual(CliExitCode.TransactionInput, exit);
@@ -329,12 +329,12 @@ public sealed class BroadcastCommandTests
         {
             await using var prepared = await PreparedBinaryTransaction.OpenAndValidateAsync(path, CancellationToken.None);
             var connection = new FakePeerConnection(PeerFrames.ReadyThen([0xe3]));
-            var output = new StringWriter();
+            var output = new ThreadSafeStringWriter();
             var application = new BsvReferenceCliApplication(
                 new FakePeerConnector(connection),
                 new TestRuntime(TestRuntime.Infinite, TestRuntime.Infinite, TestRuntime.Immediate),
                 output,
-                new StringWriter());
+                new ThreadSafeStringWriter());
 
             var exit = await application.RunBroadcastAsync(
                 CreateArguments(path),
@@ -370,13 +370,22 @@ public sealed class BroadcastCommandTests
                 new FakePeerConnector(connection),
                 new TestRuntime(TestRuntime.Infinite, TestRuntime.Infinite, _ => deliveryDeadline.Task),
                 output,
-                new StringWriter());
+                new ThreadSafeStringWriter());
 
             var running = application.RunBroadcastAsync(CreateArguments(path), prepared, CancellationToken.None).AsTask();
-            await output.Blocked;
-            deliveryDeadline.SetResult();
-            output.Release();
-            var exit = await running;
+            try
+            {
+                await output.Blocked.WaitAsync(TimeSpan.FromSeconds(5));
+                deliveryDeadline.TrySetResult();
+                await WaitUntilAsync(() => connection.AbortCount == 1);
+            }
+            finally
+            {
+                deliveryDeadline.TrySetResult();
+                output.Release();
+            }
+
+            var exit = await running.WaitAsync(TimeSpan.FromSeconds(5));
 
             Assert.AreEqual(CliExitCode.Timeout, exit);
             StringAssert.Contains(output.ToString(), "broadcast.application");
@@ -404,12 +413,12 @@ public sealed class BroadcastCommandTests
                 new byte[checked((int)prepared.Length)],
                 throwOnRead);
             var connection = new FakePeerConnection(PeerFrames.Ready());
-            var output = new StringWriter();
+            var output = new ThreadSafeStringWriter();
             var application = new BsvReferenceCliApplication(
                 new FakePeerConnector(connection),
                 new TestRuntime(),
                 output,
-                new StringWriter());
+                new ThreadSafeStringWriter());
 
             var running = application.RunBroadcastAsync(
                 CreateArguments(path),
@@ -418,7 +427,7 @@ public sealed class BroadcastCommandTests
                 CancellationToken.None).AsTask();
             await WaitUntilAsync(() => HasOutboundCommand(connection, "inv"));
             connection.PeerStream.AppendInput(PeerFrames.Inventory("getdata", prepared.TransactionId));
-            var exit = await running;
+            var exit = await running.WaitAsync(TimeSpan.FromSeconds(5));
 
             Assert.AreEqual(CliExitCode.PeerSessionFailure, exit);
             CollectionAssert.DoesNotContain(
@@ -445,7 +454,7 @@ public sealed class BroadcastCommandTests
                 new FakePeerConnector(connection),
                 new TestRuntime(),
                 output,
-                new StringWriter());
+                new ThreadSafeStringWriter());
 
             var exit = await application.RunBroadcastAsync(
                 CreateArguments(path),
@@ -471,12 +480,12 @@ public sealed class BroadcastCommandTests
         {
             await using var prepared = await PreparedBinaryTransaction.OpenAndValidateAsync(path, CancellationToken.None);
             var connection = new FakePeerConnection(PeerFrames.Ready());
-            var output = new StringWriter();
+            var output = new ThreadSafeStringWriter();
             var application = new BsvReferenceCliApplication(
                 new FakePeerConnector(connection),
                 new TestRuntime(),
                 output,
-                new StringWriter());
+                new ThreadSafeStringWriter());
 
             var running = application.RunBroadcastAsync(
                 CreateArguments(path),
@@ -485,7 +494,7 @@ public sealed class BroadcastCommandTests
             await WaitUntilAsync(() => HasOutboundCommand(connection, "inv"));
             connection.PeerStream.FailNextWrite();
             connection.PeerStream.AppendInput(PeerFrames.Inventory("getdata", prepared.TransactionId));
-            var exit = await running;
+            var exit = await running.WaitAsync(TimeSpan.FromSeconds(5));
 
             Assert.AreEqual(CliExitCode.PeerSessionFailure, exit);
             CollectionAssert.DoesNotContain(
@@ -512,14 +521,14 @@ public sealed class BroadcastCommandTests
                 new FakePeerConnector(connection),
                 new TestRuntime(),
                 output,
-                new StringWriter());
+                new ThreadSafeStringWriter());
 
             var running = application.RunBroadcastAsync(CreateArguments(path), prepared, CancellationToken.None).AsTask();
             await WaitUntilAsync(() => HasOutboundCommand(connection, "inv"));
             connection.PeerStream.AppendInput(PeerFrames.Inventory("getdata", prepared.TransactionId));
             await WaitUntilAsync(() => output.ToString().Contains("SentToPeer", StringComparison.Ordinal));
             connection.PeerStream.AppendInput(PeerFrames.Inventory("inv", prepared.TransactionId));
-            var exit = await running;
+            var exit = await running.WaitAsync(TimeSpan.FromSeconds(5));
 
             Assert.AreEqual(CliExitCode.InternalError, exit);
             StringAssert.Contains(Lines(output)[^1], "FactSinkFailure");
@@ -549,7 +558,7 @@ public sealed class BroadcastCommandTests
                     TestRuntime.Infinite,
                     _ => observationDeadline.Task),
                 output,
-                new StringWriter());
+                new ThreadSafeStringWriter());
 
             var running = application.RunBroadcastAsync(CreateArguments(path), prepared, CancellationToken.None).AsTask();
             await WaitUntilAsync(() => HasOutboundCommand(connection, "inv"));
@@ -558,10 +567,19 @@ public sealed class BroadcastCommandTests
                 output.ToString().Contains("SentToPeer", StringComparison.Ordinal) &&
                 connection.PeerStream.IsReadPending);
             connection.PeerStream.AppendInput(PeerFrames.TransactionReject(prepared.TransactionId));
-            await output.Blocked;
-            observationDeadline.SetResult();
-            output.Release();
-            var exit = await running;
+            try
+            {
+                await output.Blocked.WaitAsync(TimeSpan.FromSeconds(5));
+                observationDeadline.TrySetResult();
+                await WaitUntilAsync(() => connection.AbortCount == 1);
+            }
+            finally
+            {
+                observationDeadline.TrySetResult();
+                output.Release();
+            }
+
+            var exit = await running.WaitAsync(TimeSpan.FromSeconds(5));
 
             Assert.AreEqual(CliExitCode.PeerSessionFailure, exit);
             CollectionAssert.Contains(ReadFacts(output), BsvTransactionBroadcastOutputKind.Rejected.ToString());
@@ -580,8 +598,15 @@ public sealed class BroadcastCommandTests
         var output = new ConcurrencyDetectingWriter();
         var events = new NdjsonEventWriter(output);
 
-        await Task.WhenAll(Enumerable.Range(0, 32)
+        var writes = Task.WhenAll(Enumerable.Range(0, 32)
             .Select(index => events.WriteConnectionOpenedAsync($"requested-{index}", $"remote-{index}").AsTask()));
+        while (!writes.IsCompleted)
+        {
+            _ = output.ToString();
+            await Task.Yield();
+        }
+
+        await writes.WaitAsync(TimeSpan.FromSeconds(5));
 
         Assert.AreEqual(1, output.MaximumConcurrentWrites);
         var sequences = output.ToString()
@@ -609,15 +634,24 @@ public sealed class BroadcastCommandTests
                 new FakePeerConnector(connection),
                 new TestRuntime(TestRuntime.Infinite, TestRuntime.Infinite, _ => deliveryDeadline.Task),
                 output,
-                new StringWriter());
+                new ThreadSafeStringWriter());
 
             var running = application.RunBroadcastAsync(CreateArguments(path), prepared, CancellationToken.None).AsTask();
             await WaitUntilAsync(() => HasOutboundCommand(connection, "inv"));
             connection.PeerStream.AppendInput(PeerFrames.Inventory("getdata", prepared.TransactionId));
-            await output.Blocked;
-            deliveryDeadline.SetResult();
-            output.Release();
-            var exit = await running;
+            try
+            {
+                await output.Blocked.WaitAsync(TimeSpan.FromSeconds(5));
+                deliveryDeadline.TrySetResult();
+                await WaitUntilAsync(() => connection.AbortCount == 1);
+            }
+            finally
+            {
+                deliveryDeadline.TrySetResult();
+                output.Release();
+            }
+
+            var exit = await running.WaitAsync(TimeSpan.FromSeconds(5));
 
             Assert.AreEqual(CliExitCode.Success, exit);
             CollectionAssert.Contains(ReadFacts(output), BsvTransactionBroadcastOutputKind.SentToPeer.ToString());
@@ -726,7 +760,7 @@ public sealed class BroadcastCommandTests
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
 
-    private sealed class ThrowAfterLinesWriter(int allowedLines) : StringWriter
+    private sealed class ThrowAfterLinesWriter(int allowedLines) : ThreadSafeStringWriter
     {
         internal int CompletedLineCount { get; private set; }
 
@@ -744,7 +778,7 @@ public sealed class BroadcastCommandTests
         }
     }
 
-    private sealed class ThrowOnceOnContentWriter(string content) : StringWriter
+    private sealed class ThrowOnceOnContentWriter(string content) : ThreadSafeStringWriter
     {
         private int _thrown;
 
@@ -762,7 +796,7 @@ public sealed class BroadcastCommandTests
         }
     }
 
-    private sealed class ConcurrencyDetectingWriter : StringWriter
+    private sealed class ConcurrencyDetectingWriter : ThreadSafeStringWriter
     {
         private int _concurrent;
         private int _maximumConcurrent;
@@ -787,7 +821,7 @@ public sealed class BroadcastCommandTests
         }
     }
 
-    private sealed class BlockingOnContentWriter(string content) : StringWriter
+    private sealed class BlockingOnContentWriter(string content) : ThreadSafeStringWriter
     {
         private readonly TaskCompletionSource _blocked =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
