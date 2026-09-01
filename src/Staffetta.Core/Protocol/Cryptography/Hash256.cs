@@ -84,6 +84,8 @@ public readonly struct Hash256 : IEquatable<Hash256>
             BinaryPrimitives.ReadUInt64LittleEndian(wireBytes[(sizeof(ulong) * 2)..]),
             BinaryPrimitives.ReadUInt64LittleEndian(wireBytes[(sizeof(ulong) * 3)..]));
 
+    internal UInt256 ToUInt256() => new(_part0, _part1, _part2, _part3);
+
     internal void WriteWireBytesTo(Span<byte> destination)
     {
         BinaryPrimitives.WriteUInt64LittleEndian(destination, _part0);
