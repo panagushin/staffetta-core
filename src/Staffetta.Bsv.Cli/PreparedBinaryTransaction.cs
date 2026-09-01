@@ -76,7 +76,9 @@ internal sealed class PreparedBinaryTransaction :
             var buffer = ArrayPool<byte>.Shared.Rent(BufferLength);
             try
             {
-                using var parser = new LegacyTransactionParser(NoOpTransactionSink.Instance);
+                var monetaryValidator = new BsvTransactionMonetaryRangeValidator(
+                    NoOpTransactionSink.Instance);
+                using var parser = new LegacyTransactionParser(monetaryValidator);
                 ulong accepted = 0;
                 while (accepted < (ulong)length)
                 {
@@ -104,10 +106,17 @@ internal sealed class PreparedBinaryTransaction :
 
                 if (!parser.IsReadyToCommit ||
                     parser.Commit(out var summary) != OperationStatus.Done ||
+                    !monetaryValidator.TryGetCommittedValidation(out var validation) ||
                     summary.SerializedLength != (ulong)length ||
                     stream.Length != length)
                 {
                     throw new TransactionInputException("The transaction file is incomplete or changed during validation.");
+                }
+
+                if (!validation.IsValid)
+                {
+                    throw new TransactionInputException(
+                        $"The transaction violates BSV monetary range policy: {validation.Reason}.");
                 }
 
                 stream.Position = 0;

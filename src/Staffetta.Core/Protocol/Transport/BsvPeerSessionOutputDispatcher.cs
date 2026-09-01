@@ -2,6 +2,7 @@ using System.Buffers;
 using Staffetta.Core.Protocol.Handshake;
 using Staffetta.Core.Protocol.Relay;
 using Staffetta.Core.Protocol.Sessions;
+using Staffetta.Core.Protocol.Transactions;
 
 namespace Staffetta.Core.Protocol.Transport;
 
@@ -42,6 +43,8 @@ internal sealed class BsvPeerSessionOutputDispatcher
         new BsvTransactionBroadcastOutput[BsvTransactionBroadcastStateMachine.MaximumOutputCount];
     private readonly BsvTransactionFetchOutput[] _fetchOutputs =
         new BsvTransactionFetchOutput[BsvTransactionFetchStateMachine.MaximumOutputCount];
+    private readonly BsvTransactionMonetaryValidation[] _monetaryValidations =
+        new BsvTransactionMonetaryValidation[1];
 
     private int _handshakeOutputIndex;
     private int _handshakeOutputCount;
@@ -49,6 +52,8 @@ internal sealed class BsvPeerSessionOutputDispatcher
     private int _broadcastOutputCount;
     private int _fetchOutputIndex;
     private int _fetchOutputCount;
+    private int _monetaryValidationIndex;
+    private int _monetaryValidationCount;
 
     internal BsvPeerSessionOutputDispatcher(
         BsvPeerSessionIngressAdapter session,
@@ -63,7 +68,8 @@ internal sealed class BsvPeerSessionOutputDispatcher
     internal bool HasStagedOutputs =>
         _handshakeOutputIndex != _handshakeOutputCount ||
         _broadcastOutputIndex != _broadcastOutputCount ||
-        _fetchOutputIndex != _fetchOutputCount;
+        _fetchOutputIndex != _fetchOutputCount ||
+        _monetaryValidationIndex != _monetaryValidationCount;
 
     internal bool TryStageOutputs()
     {
@@ -93,6 +99,15 @@ internal sealed class BsvPeerSessionOutputDispatcher
             return status == OperationStatus.Done;
         }
 
+        if (_session.PendingMonetaryValidationCount != 0)
+        {
+            var status = _session.DrainMonetaryValidations(
+                _monetaryValidations,
+                out _monetaryValidationCount);
+            _monetaryValidationIndex = 0;
+            return status == OperationStatus.Done;
+        }
+
         return !_session.HasPendingOutputs;
     }
 
@@ -111,6 +126,11 @@ internal sealed class BsvPeerSessionOutputDispatcher
         if (_fetchOutputIndex != _fetchOutputCount)
         {
             return DispatchFetchOutput(_fetchOutputs[_fetchOutputIndex]);
+        }
+
+        if (_monetaryValidationIndex != _monetaryValidationCount)
+        {
+            return BsvPeerSessionOutputDispatch.FactPending;
         }
 
         return BsvPeerSessionOutputDispatch.InvalidData;
@@ -147,6 +167,13 @@ internal sealed class BsvPeerSessionOutputDispatcher
                 CancellationToken.None);
         }
 
+        if (_monetaryValidationIndex != _monetaryValidationCount)
+        {
+            return _factSink.OnMonetaryValidationFactAsync(
+                _monetaryValidations[_monetaryValidationIndex],
+                CancellationToken.None);
+        }
+
         throw new InvalidOperationException("The staged output is not a fact.");
     }
 
@@ -172,6 +199,12 @@ internal sealed class BsvPeerSessionOutputDispatcher
                 _fetchOutputs[_fetchOutputIndex].Kind != BsvTransactionFetchOutputKind.SendGetData)
             {
                 AdvanceFetchOutput();
+                return true;
+            }
+
+            if (_monetaryValidationIndex != _monetaryValidationCount)
+            {
+                AdvanceMonetaryValidation();
                 return true;
             }
 
@@ -292,6 +325,16 @@ internal sealed class BsvPeerSessionOutputDispatcher
         {
             _fetchOutputIndex = 0;
             _fetchOutputCount = 0;
+        }
+    }
+
+    private void AdvanceMonetaryValidation()
+    {
+        _monetaryValidations[_monetaryValidationIndex++] = default;
+        if (_monetaryValidationIndex == _monetaryValidationCount)
+        {
+            _monetaryValidationIndex = 0;
+            _monetaryValidationCount = 0;
         }
     }
 

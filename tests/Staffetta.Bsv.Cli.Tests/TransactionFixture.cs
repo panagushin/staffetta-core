@@ -4,7 +4,7 @@ namespace Staffetta.Bsv.Cli.Tests;
 
 internal static class TransactionFixture
 {
-    internal static byte[] CreateMinimal()
+    internal static byte[] CreateMinimal(long outputValueSatoshis = 1)
     {
         var transaction = new byte[60];
         BinaryPrimitives.WriteInt32LittleEndian(transaction, 1);
@@ -12,13 +12,14 @@ internal static class TransactionFixture
         BinaryPrimitives.WriteUInt32LittleEndian(transaction.AsSpan(37), uint.MaxValue);
         BinaryPrimitives.WriteUInt32LittleEndian(transaction.AsSpan(42), uint.MaxValue);
         transaction[46] = 1;
-        BinaryPrimitives.WriteInt64LittleEndian(transaction.AsSpan(47), 1);
+        BinaryPrimitives.WriteInt64LittleEndian(transaction.AsSpan(47), outputValueSatoshis);
         return transaction;
     }
 
     internal static async ValueTask<string> WriteTempAsync(
         int outputScriptLength = 0,
-        ReadOnlyMemory<byte> trailing = default)
+        ReadOnlyMemory<byte> trailing = default,
+        long outputValueSatoshis = 1)
     {
         var path = Path.Combine(Path.GetTempPath(), $"staffetta-cli-{Guid.NewGuid():N}.bin");
         await using var stream = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None);
@@ -28,7 +29,7 @@ internal static class TransactionFixture
         BinaryPrimitives.WriteUInt32LittleEndian(prefix.AsSpan(37), uint.MaxValue);
         BinaryPrimitives.WriteUInt32LittleEndian(prefix.AsSpan(42), uint.MaxValue);
         prefix[46] = 1;
-        BinaryPrimitives.WriteInt64LittleEndian(prefix.AsSpan(47), 1);
+        BinaryPrimitives.WriteInt64LittleEndian(prefix.AsSpan(47), outputValueSatoshis);
         await stream.WriteAsync(prefix);
         WriteCompactSize(stream, (ulong)outputScriptLength);
         var scriptChunk = new byte[8192];

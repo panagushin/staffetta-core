@@ -353,6 +353,9 @@ internal static class PeerFrames
         return Encode("reject"u8, payload[..payloadLength]);
     }
 
+    internal static byte[] Transaction(ReadOnlySpan<byte> transaction) =>
+        Encode("tx"u8, transaction);
+
     internal static string[] ReadOutboundCommands(byte[] wire)
     {
         var commands = new List<string>();

@@ -1,6 +1,7 @@
 using Staffetta.Core.Protocol.Cryptography;
 using Staffetta.Core.Protocol.Handshake;
 using Staffetta.Core.Protocol.Relay;
+using Staffetta.Core.Protocol.Transactions;
 
 namespace Staffetta.Core.Protocol.Transport;
 
@@ -32,5 +33,9 @@ internal interface IBsvPeerSessionFactSink
 
     ValueTask OnFetchFactAsync(
         BsvTransactionFetchOutput output,
+        CancellationToken cancellationToken);
+
+    ValueTask OnMonetaryValidationFactAsync(
+        BsvTransactionMonetaryValidation validation,
         CancellationToken cancellationToken);
 }

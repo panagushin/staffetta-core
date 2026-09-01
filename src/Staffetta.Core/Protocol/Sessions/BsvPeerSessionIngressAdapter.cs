@@ -115,6 +115,9 @@ public sealed class BsvPeerSessionIngressAdapter :
 
     public int PendingFetchOutputCount => _processor.PendingFetchOutputCount;
 
+    internal int PendingMonetaryValidationCount =>
+        _processor.PendingMonetaryValidationCount;
+
     public bool HasPendingOutputs => _processor.HasPendingOutputs;
 
     public OperationStatus StartHandshake(ulong localNonce)
@@ -439,6 +442,14 @@ public sealed class BsvPeerSessionIngressAdapter :
     {
         ThrowIfUnavailable();
         return _processor.DrainFetchOutputs(destination, out outputsWritten);
+    }
+
+    internal OperationStatus DrainMonetaryValidations(
+        Span<BsvTransactionMonetaryValidation> destination,
+        out int outputsWritten)
+    {
+        ThrowIfUnavailable();
+        return _processor.DrainMonetaryValidations(destination, out outputsWritten);
     }
 
     public OperationStatus CompleteEndOfInput()

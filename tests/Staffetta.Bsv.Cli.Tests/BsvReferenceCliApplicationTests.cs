@@ -121,6 +121,46 @@ public sealed class BsvReferenceCliApplicationTests
     }
 
     [TestMethod]
+    public async Task MonetaryInvalidBroadcastReturnsThreeBeforeConnectorConstruction()
+    {
+        var path = await TransactionFixture.WriteTempAsync(outputValueSatoshis: -1);
+        try
+        {
+            var connectorFactoryCalls = 0;
+            var output = new StringWriter();
+            var error = new StringWriter();
+            var arguments = new CliArguments(
+                ReferenceCliCommand.Broadcast,
+                new PeerEndpoint("node.example", 8333),
+                path,
+                TimeSpan.FromSeconds(5),
+                TimeSpan.FromSeconds(30),
+                TimeSpan.FromSeconds(30));
+
+            var exit = await ReferenceCliDispatcher.RunAsync(
+                arguments,
+                () =>
+                {
+                    connectorFactoryCalls++;
+                    throw new AssertFailedException("connector constructed");
+                },
+                new TestRuntime(),
+                output,
+                error,
+                CancellationToken.None);
+
+            Assert.AreEqual(CliExitCode.TransactionInput, exit);
+            Assert.AreEqual(0, connectorFactoryCalls);
+            Assert.AreEqual(string.Empty, output.ToString());
+            StringAssert.Contains(error.ToString(), "NegativeOutput");
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [TestMethod]
     public async Task SilentHandshakeTimeoutStopsBeforeForcedSocketClose()
     {
         var connection = new FakePeerConnection([]);

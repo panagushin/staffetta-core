@@ -30,6 +30,7 @@ internal sealed class BsvPeerSessionFrameProcessor :
     private readonly InventoryVector[] _inventoryBatch = new InventoryVector[InventoryBatchLength];
     private readonly byte[] _rejectPayload = new byte[RejectPayloadCodec.MaximumPayloadLength];
     private readonly IncrementalInventoryPayloadParser _inventoryParser = new();
+    private readonly BsvTransactionMonetaryRangeValidator _monetaryValidator;
     private readonly LegacyTransactionParser _transactionParser;
 
     private FrameRoute _activeRoute;
@@ -41,6 +42,8 @@ internal sealed class BsvPeerSessionFrameProcessor :
     private bool _hasMatchingFetchInventory;
     private bool _frameAborted;
     private bool _frameProcessingFailed;
+    private bool _hasPendingMonetaryValidation;
+    private BsvTransactionMonetaryValidation _pendingMonetaryValidation;
 
     internal BsvPeerSessionFrameProcessor(
         int minimumPeerProtocolVersion,
@@ -49,8 +52,9 @@ internal sealed class BsvPeerSessionFrameProcessor :
         _handshakeProcessor = new BsvHandshakeFrameProcessor(
             minimumPeerProtocolVersion,
             trackEgressProvenance: true);
+        _monetaryValidator = new BsvTransactionMonetaryRangeValidator(transactionSink);
         _transactionParser = new LegacyTransactionParser(
-            transactionSink,
+            _monetaryValidator,
             LegacyTransactionHashMode.ExternalValidatedPayload);
     }
 
@@ -104,8 +108,12 @@ internal sealed class BsvPeerSessionFrameProcessor :
 
     internal int PendingFetchOutputCount => _relay.PendingFetchOutputCount;
 
+    internal int PendingMonetaryValidationCount => _hasPendingMonetaryValidation ? 1 : 0;
+
     internal bool HasPendingOutputs =>
-        PendingHandshakeOutputCount != 0 || _relay.HasPendingOutputs;
+        PendingHandshakeOutputCount != 0 ||
+        _relay.HasPendingOutputs ||
+        _hasPendingMonetaryValidation;
 
     internal bool FrameAborted => _frameAborted || _handshakeProcessor.FrameAborted;
 
@@ -187,6 +195,28 @@ internal sealed class BsvPeerSessionFrameProcessor :
         out int outputsWritten) =>
         _relay.DrainFetchOutputs(destination, out outputsWritten);
 
+    internal OperationStatus DrainMonetaryValidations(
+        Span<BsvTransactionMonetaryValidation> destination,
+        out int outputsWritten)
+    {
+        outputsWritten = 0;
+        if (!_hasPendingMonetaryValidation)
+        {
+            return OperationStatus.Done;
+        }
+
+        if (destination.IsEmpty)
+        {
+            return OperationStatus.DestinationTooSmall;
+        }
+
+        destination[0] = _pendingMonetaryValidation;
+        _pendingMonetaryValidation = default;
+        _hasPendingMonetaryValidation = false;
+        outputsWritten = 1;
+        return OperationStatus.Done;
+    }
+
     internal void BeginConsume()
     {
         _frameAborted = false;
@@ -206,6 +236,8 @@ internal sealed class BsvPeerSessionFrameProcessor :
     {
         _handshakeProcessor.DiscardOutputsAndEgressIntents();
         _relay.Terminate(cause);
+        _pendingMonetaryValidation = default;
+        _hasPendingMonetaryValidation = false;
     }
 
     public void Dispose()
@@ -434,9 +466,26 @@ internal sealed class BsvPeerSessionFrameProcessor :
                     payloadHash,
                     _activePayloadLength,
                     out var summary);
-                return commitStatus == OperationStatus.Done
-                    ? _relay.OnPeerTransaction(summary.TransactionId)
-                    : commitStatus;
+                if (commitStatus != OperationStatus.Done ||
+                    !_monetaryValidator.TryGetCommittedValidation(out var validation) ||
+                    validation.TransactionId != summary.TransactionId)
+                {
+                    return OperationStatus.InvalidData;
+                }
+
+                if (validation.IsValid)
+                {
+                    return _relay.OnPeerTransaction(summary.TransactionId);
+                }
+
+                if (_hasPendingMonetaryValidation)
+                {
+                    return OperationStatus.DestinationTooSmall;
+                }
+
+                _pendingMonetaryValidation = validation;
+                _hasPendingMonetaryValidation = true;
+                return OperationStatus.Done;
 
             case FrameRoute.RelayReject:
                 var rejectStatus = RejectPayloadCodec.TryParse(

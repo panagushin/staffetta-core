@@ -88,6 +88,55 @@ public sealed class BroadcastCommandTests
     }
 
     [TestMethod]
+    public async Task MonetaryInvalidPeerTransactionIsReportedAndNextFrameStillCompletesObservation()
+    {
+        var path = await TransactionFixture.WriteTempAsync();
+        try
+        {
+            await using var prepared = await PreparedBinaryTransaction.OpenAndValidateAsync(
+                path,
+                CancellationToken.None);
+            var connection = new FakePeerConnection(PeerFrames.Ready());
+            var output = new StringWriter(System.Globalization.CultureInfo.InvariantCulture);
+            var application = new BsvReferenceCliApplication(
+                new FakePeerConnector(connection),
+                new TestRuntime(),
+                output,
+                new StringWriter());
+
+            var running = application.RunBroadcastAsync(
+                CreateArguments(path),
+                prepared,
+                CancellationToken.None).AsTask();
+            await WaitUntilAsync(() => HasOutboundCommand(connection, "inv"));
+            connection.PeerStream.AppendInput(PeerFrames.Inventory("getdata", prepared.TransactionId));
+            await WaitUntilAsync(() => HasOutboundCommand(connection, "tx"));
+            connection.PeerStream.AppendInput(
+                PeerFrames.Transaction(TransactionFixture.CreateMinimal(-1)));
+            await WaitUntilAsync(() => output.ToString().Contains(
+                "transaction.monetary-validation",
+                StringComparison.Ordinal));
+            connection.PeerStream.AppendInput(PeerFrames.Inventory("inv", prepared.TransactionId));
+
+            var exit = await running;
+
+            Assert.AreEqual(CliExitCode.Success, exit);
+            var monetaryLine = Lines(output).Single(static line =>
+                line.Contains("transaction.monetary-validation", StringComparison.Ordinal));
+            StringAssert.Contains(monetaryLine, "\"outcome\":\"monetary-invalid\"");
+            StringAssert.Contains(monetaryLine, "\"reason\":\"NegativeOutput\"");
+            CollectionAssert.Contains(
+                ReadFacts(output),
+                BsvTransactionBroadcastOutputKind.ObservedFromPeer.ToString());
+            StringAssert.Contains(Lines(output)[^1], "session.stopped");
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [TestMethod]
     public async Task PeerRejectAfterTransactionCommitIsReportedWithoutSuccess()
     {
         var path = await TransactionFixture.WriteTempAsync();

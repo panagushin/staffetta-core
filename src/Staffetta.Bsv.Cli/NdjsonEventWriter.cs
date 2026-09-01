@@ -133,6 +133,24 @@ internal sealed class NdjsonEventWriter
                 transportReason),
             cancellationToken);
 
+    internal ValueTask WriteMonetaryValidationAsync(
+        BsvTransactionMonetaryValidation validation,
+        CancellationToken cancellationToken = default) =>
+        WriteAsync(
+            sequence => new MonetaryValidationEvent(
+                Schema,
+                sequence,
+                "transaction.monetary-validation",
+                validation.TransactionId.ToDisplayHex(),
+                "monetary-invalid",
+                validation.Reason.ToString(),
+                Format(validation.OutputIndex),
+                validation.OutputValueSatoshis.ToString(
+                    System.Globalization.CultureInfo.InvariantCulture),
+                validation.TotalOutputValueSatoshis.ToString(
+                    System.Globalization.CultureInfo.InvariantCulture)),
+            cancellationToken);
+
     internal ValueTask WriteSessionTerminalAsync(
         string stage,
         string kind,
@@ -256,6 +274,17 @@ internal sealed class NdjsonEventWriter
         string Reason,
         string? TransportKind,
         string? TransportReason);
+
+    private sealed record MonetaryValidationEvent(
+        string Schema,
+        long Sequence,
+        string Type,
+        string Txid,
+        string Outcome,
+        string Reason,
+        string OutputIndex,
+        string OutputValueSatoshis,
+        string TotalOutputValueSatoshis);
 
     private sealed record SessionTerminalEvent(
         string Schema,

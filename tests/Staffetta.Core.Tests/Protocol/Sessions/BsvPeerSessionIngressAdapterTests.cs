@@ -81,6 +81,67 @@ public sealed class BsvPeerSessionIngressAdapterTests
     }
 
     [TestMethod]
+    public void MonetaryInvalidPeerTransactionReportsFindingWithoutAdvancingFetchOrFaultingSession()
+    {
+        var sink = new RecordingTransactionSink();
+        using var session = CreateReadySession(sink, bytewise: false);
+        var invalidTransaction = CreateMinimalTransaction(-1);
+        var invalidTransactionId = Hash256.DoubleSha256(invalidTransaction);
+        Assert.AreEqual(OperationStatus.Done, session.StartFetch(invalidTransactionId));
+
+        ConsumeFrame(session, EncodeBasic("tx"u8, invalidTransaction), bytewise: true);
+
+        Assert.AreEqual(0, sink.CommittedCount);
+        Assert.AreEqual(1, sink.AbortedCount);
+        Assert.AreEqual(BsvTransactionFetchState.AwaitingInventory, session.FetchState);
+        Assert.AreEqual(0, session.PendingFetchOutputCount);
+        Assert.AreEqual(1, session.PendingMonetaryValidationCount);
+        Assert.AreEqual(
+            OperationStatus.DestinationTooSmall,
+            session.Consume(EncodeBasic("tx"u8, CreateMinimalTransaction()), out var blocked));
+        Assert.AreEqual(0, blocked);
+
+        Span<BsvTransactionMonetaryValidation> findings =
+            stackalloc BsvTransactionMonetaryValidation[1];
+        Assert.AreEqual(
+            OperationStatus.Done,
+            session.DrainMonetaryValidations(findings, out var findingsWritten));
+        Assert.AreEqual(1, findingsWritten);
+        Assert.AreEqual(invalidTransactionId, findings[0].TransactionId);
+        Assert.AreEqual(
+            BsvTransactionMonetaryValidationReason.NegativeOutput,
+            findings[0].Reason);
+
+        var validTransaction = CreateMinimalTransaction();
+        ConsumeFrame(session, EncodeBasic("tx"u8, validTransaction), bytewise: false);
+        Assert.AreEqual(1, sink.CommittedCount);
+        Assert.AreEqual(1, sink.AbortedCount);
+        Assert.AreEqual(BsvTransactionFetchState.AwaitingInventory, session.FetchState);
+        Span<BsvTransactionFetchOutput> fetchOutputs =
+            stackalloc BsvTransactionFetchOutput[BsvTransactionFetchStateMachine.MaximumOutputCount];
+        DrainFetch(
+            session,
+            fetchOutputs,
+            BsvTransactionFetchOutputKind.UnexpectedTransaction,
+            Hash256.DoubleSha256(validTransaction));
+    }
+
+    [TestMethod]
+    public void BadChecksumPublishesNoMonetaryFinding()
+    {
+        var sink = new RecordingTransactionSink();
+        using var session = CreateReadySession(sink, bytewise: false);
+        var frame = EncodeBasic("tx"u8, CreateMinimalTransaction(-1));
+        frame[20] ^= 0xff;
+
+        Assert.AreEqual(OperationStatus.InvalidData, session.Consume(frame, out var consumed));
+        Assert.AreEqual(frame.Length, consumed);
+        Assert.AreEqual(0, session.PendingMonetaryValidationCount);
+        Assert.AreEqual(0, sink.CommittedCount);
+        Assert.AreEqual(1, sink.AbortedCount);
+    }
+
+    [TestMethod]
     public void FetchIntentBecomesRequestedOnlyAfterWriteCommitThenReceivesTransaction()
     {
         var sink = new RecordingTransactionSink();
@@ -879,7 +940,7 @@ public sealed class BsvPeerSessionIngressAdapterTests
         return destination;
     }
 
-    private static byte[] CreateMinimalTransaction()
+    private static byte[] CreateMinimalTransaction(long outputValueSatoshis = 1)
     {
         var transaction = new byte[60];
         BinaryPrimitives.WriteInt32LittleEndian(transaction, 1);
@@ -888,7 +949,7 @@ public sealed class BsvPeerSessionIngressAdapterTests
         transaction[41] = 0;
         BinaryPrimitives.WriteUInt32LittleEndian(transaction.AsSpan(42), uint.MaxValue);
         transaction[46] = 1;
-        BinaryPrimitives.WriteInt64LittleEndian(transaction.AsSpan(47), 1);
+        BinaryPrimitives.WriteInt64LittleEndian(transaction.AsSpan(47), outputValueSatoshis);
         transaction[55] = 0;
         return transaction;
     }

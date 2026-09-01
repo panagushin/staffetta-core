@@ -68,6 +68,28 @@ public sealed class PreparedBinaryTransactionTests
     }
 
     [TestMethod]
+    public async Task MonetaryInvalidTransactionsAreRejectedAfterStructuralParsing()
+    {
+        var negative = await TransactionFixture.WriteTempAsync(outputValueSatoshis: -1);
+        var tooLarge = await TransactionFixture.WriteTempAsync(
+            outputValueSatoshis: 2_100_000_000_000_001);
+        try
+        {
+            var negativeError = await Assert.ThrowsAsync<TransactionInputException>(async () =>
+                await PreparedBinaryTransaction.OpenAndValidateAsync(negative, CancellationToken.None));
+            StringAssert.Contains(negativeError.Message, "NegativeOutput");
+            var tooLargeError = await Assert.ThrowsAsync<TransactionInputException>(async () =>
+                await PreparedBinaryTransaction.OpenAndValidateAsync(tooLarge, CancellationToken.None));
+            StringAssert.Contains(tooLargeError.Message, "OutputExceedsMaximum");
+        }
+        finally
+        {
+            File.Delete(negative);
+            File.Delete(tooLarge);
+        }
+    }
+
+    [TestMethod]
     public async Task ReplayReadHonorsCancellationAndDisposeIsIdempotent()
     {
         var path = await TransactionFixture.WriteTempAsync();

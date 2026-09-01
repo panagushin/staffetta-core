@@ -705,6 +705,10 @@ internal sealed class StopOnAnnouncedFactSink : IBsvPeerSessionFactSink
     public ValueTask OnFetchFactAsync(
         BsvTransactionFetchOutput output,
         CancellationToken cancellationToken) => ValueTask.CompletedTask;
+
+    public ValueTask OnMonetaryValidationFactAsync(
+        BsvTransactionMonetaryValidation validation,
+        CancellationToken cancellationToken) => ValueTask.CompletedTask;
 }
 
 internal sealed class BlockingPayloadSource : IBsvTransactionPayloadSource

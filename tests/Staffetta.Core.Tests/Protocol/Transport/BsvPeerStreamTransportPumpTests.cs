@@ -947,6 +947,14 @@ public sealed class BsvPeerStreamTransportPumpTests
             cancellationToken.ThrowIfCancellationRequested();
             return ValueTask.CompletedTask;
         }
+
+        public ValueTask OnMonetaryValidationFactAsync(
+            BsvTransactionMonetaryValidation validation,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return ValueTask.CompletedTask;
+        }
     }
 
     private sealed class NoOpTransactionSink : ILegacyTransactionSink

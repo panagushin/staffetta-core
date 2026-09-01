@@ -214,6 +214,11 @@ internal sealed class CorePeerSessionBridge : IBsvPeerSessionFactSink, IAsyncDis
         CancellationToken cancellationToken) =>
         ValueTask.FromException(new InvalidOperationException("The reference handshake command cannot fetch."));
 
+    public ValueTask OnMonetaryValidationFactAsync(
+        BsvTransactionMonetaryValidation validation,
+        CancellationToken cancellationToken) =>
+        _events.WriteMonetaryValidationAsync(validation, cancellationToken);
+
     private sealed class RejectingTransactionSourceProvider : IBsvTransactionPayloadSourceProvider
     {
         internal static RejectingTransactionSourceProvider Instance { get; } = new();
