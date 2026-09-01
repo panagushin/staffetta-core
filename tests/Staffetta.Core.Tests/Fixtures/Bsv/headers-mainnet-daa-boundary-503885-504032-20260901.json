@@ -98,6 +98,6 @@
     "ClaimedTargetProofOfWork": true,
     "IndependentFullBatchEquality": true,
     "CheckpointSandwich": true,
-    "DifficultyAdjustmentAlgorithm": false
+    "DifficultyAdjustmentAlgorithm": true
   }
 }

@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Text.Json;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 using Staffetta.Core.Protocol.Blocks;
+using Staffetta.Core.Protocol.Cryptography;
 using Staffetta.Core.Protocol.Encoding;
 
 namespace Staffetta.Core.Tests.Fixtures.Bsv;
@@ -56,6 +57,9 @@ public sealed class BsvMainnetDaaBoundaryFixtureTests
         Assert.AreEqual(AnchorBlockId, headers[0].PreviousBlockHash.ToDisplayHex());
 
         var proofOfWorkLimit = CompactTarget.Decode(0x1d00ffff).Value;
+        Span<BlockDifficultyContext> daaContext =
+            stackalloc BlockDifficultyContext[BsvMainnetDifficultyAdjustment.RequiredContextLength];
+        UInt256 cumulativeWork = UInt256.Zero;
         string? firstBlockId = null;
         string? lastBlockId = null;
         for (var index = 0; index < headerCount; index++)
@@ -73,6 +77,15 @@ public sealed class BsvMainnetDaaBoundaryFixtureTests
                 BlockProofOfWorkValidation.Valid,
                 BlockProofOfWork.Validate(headers[index], proofOfWorkLimit),
                 $"Header at height {FirstHeight + index} failed claimed-target proof-of-work.");
+            if (index < daaContext.Length)
+            {
+                cumulativeWork = cumulativeWork.Add(BlockProofOfWork.GetBlockWork(headers[index].Bits));
+                daaContext[index] = new BlockDifficultyContext(
+                    FirstHeight + index,
+                    headers[index].Timestamp,
+                    cumulativeWork);
+            }
+
             firstBlockId ??= blockId;
             lastBlockId = blockId;
         }
@@ -81,6 +94,14 @@ public sealed class BsvMainnetDaaBoundaryFixtureTests
         Assert.AreEqual(ExpectedDaaCheckpointBlockId, headers[504_031 - FirstHeight].ComputeHash().ToDisplayHex());
         Assert.AreEqual(ExpectedLastBlockId, headers[504_032 - FirstHeight].ComputeHash().ToDisplayHex());
         Assert.AreEqual(ExpectedLastBlockId, lastBlockId);
+        Assert.AreEqual(
+            DifficultyAdjustmentCalculationStatus.Done,
+            BsvMainnetDifficultyAdjustment.CalculateNextBits(
+                daaContext,
+                proofOfWorkLimit,
+                out uint expectedCompactTarget));
+        Assert.AreEqual<uint>(0x1805b42b, expectedCompactTarget);
+        Assert.AreEqual(expectedCompactTarget, headers[504_032 - FirstHeight].Bits);
     }
 
     private static void AssertMetadata(FixtureMetadata metadata)
@@ -171,9 +192,7 @@ public sealed class BsvMainnetDaaBoundaryFixtureTests
         Assert.IsTrue(metadata.Validates.ClaimedTargetProofOfWork);
         Assert.IsTrue(metadata.Validates.IndependentFullBatchEquality);
         Assert.IsTrue(metadata.Validates.CheckpointSandwich);
-        Assert.IsFalse(
-            metadata.Validates.DifficultyAdjustmentAlgorithm,
-            "This fixture validates captured headers and their claimed targets, not the DAA calculation.");
+        Assert.IsTrue(metadata.Validates.DifficultyAdjustmentAlgorithm);
     }
 
     private static void AssertCapture(

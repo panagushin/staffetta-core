@@ -129,13 +129,83 @@ internal readonly struct UInt256 : IComparable<UInt256>, IEquatable<UInt256>
 
     internal UInt256 AddOne()
     {
-        var part0 = _part0 + 1;
-        var carry = part0 == 0 ? 1UL : 0UL;
-        var part1 = _part1 + carry;
-        carry = carry != 0 && part1 == 0 ? 1UL : 0UL;
-        var part2 = _part2 + carry;
-        carry = carry != 0 && part2 == 0 ? 1UL : 0UL;
-        return new UInt256(part0, part1, part2, _part3 + carry);
+        unchecked
+        {
+            var part0 = _part0 + 1;
+            var carry = part0 == 0 ? 1UL : 0UL;
+            var part1 = _part1 + carry;
+            carry = carry != 0 && part1 == 0 ? 1UL : 0UL;
+            var part2 = _part2 + carry;
+            carry = carry != 0 && part2 == 0 ? 1UL : 0UL;
+            return new UInt256(part0, part1, part2, _part3 + carry);
+        }
+    }
+
+    internal UInt256 Add(UInt256 other)
+    {
+        unchecked
+        {
+            var part0 = _part0 + other._part0;
+            var carry = part0 < _part0 ? 1UL : 0UL;
+
+            var part1 = _part1 + other._part1;
+            var nextCarry = part1 < _part1;
+            var part1WithCarry = part1 + carry;
+            carry = nextCarry || part1WithCarry < part1 ? 1UL : 0UL;
+
+            var part2 = _part2 + other._part2;
+            nextCarry = part2 < _part2;
+            var part2WithCarry = part2 + carry;
+            carry = nextCarry || part2WithCarry < part2 ? 1UL : 0UL;
+
+            return new UInt256(
+                part0,
+                part1WithCarry,
+                part2WithCarry,
+                _part3 + other._part3 + carry);
+        }
+    }
+
+    internal UInt256 Subtract(UInt256 other)
+    {
+        unchecked
+        {
+            var part0 = _part0 - other._part0;
+            var borrow = _part0 < other._part0 ? 1UL : 0UL;
+
+            var part1Subtrahend = other._part1 + borrow;
+            var part1Carry = part1Subtrahend < other._part1;
+            var part1 = _part1 - part1Subtrahend;
+            borrow = part1Carry || _part1 < part1Subtrahend ? 1UL : 0UL;
+
+            var part2Subtrahend = other._part2 + borrow;
+            var part2Carry = part2Subtrahend < other._part2;
+            var part2 = _part2 - part2Subtrahend;
+            borrow = part2Carry || _part2 < part2Subtrahend ? 1UL : 0UL;
+
+            return new UInt256(part0, part1, part2, _part3 - other._part3 - borrow);
+        }
+    }
+
+    internal UInt256 Multiply(uint factor)
+    {
+        unchecked
+        {
+            UInt128 product = (UInt128)_part0 * factor;
+            var part0 = (ulong)product;
+            UInt128 carry = product >> 64;
+
+            product = ((UInt128)_part1 * factor) + carry;
+            var part1 = (ulong)product;
+            carry = product >> 64;
+
+            product = ((UInt128)_part2 * factor) + carry;
+            var part2 = (ulong)product;
+            carry = product >> 64;
+
+            product = ((UInt128)_part3 * factor) + carry;
+            return new UInt256(part0, part1, part2, (ulong)product);
+        }
     }
 
     internal static UInt256 Divide(UInt256 numerator, UInt256 denominator)
@@ -167,6 +237,8 @@ internal readonly struct UInt256 : IComparable<UInt256>, IEquatable<UInt256>
     }
 
     internal UInt256 OnesComplement() => new(~_part0, ~_part1, ~_part2, ~_part3);
+
+    internal UInt256 Negate() => OnesComplement().AddOne();
 
     public int CompareTo(UInt256 other)
     {
@@ -233,21 +305,4 @@ internal readonly struct UInt256 : IComparable<UInt256>, IEquatable<UInt256>
         };
     }
 
-    private UInt256 Subtract(UInt256 other)
-    {
-        var part0 = _part0 - other._part0;
-        var borrow = _part0 < other._part0 ? 1UL : 0UL;
-
-        var part1Subtrahend = other._part1 + borrow;
-        var part1Carry = part1Subtrahend < other._part1;
-        var part1 = _part1 - part1Subtrahend;
-        borrow = part1Carry || _part1 < part1Subtrahend ? 1UL : 0UL;
-
-        var part2Subtrahend = other._part2 + borrow;
-        var part2Carry = part2Subtrahend < other._part2;
-        var part2 = _part2 - part2Subtrahend;
-        borrow = part2Carry || _part2 < part2Subtrahend ? 1UL : 0UL;
-
-        return new UInt256(part0, part1, part2, _part3 - other._part3 - borrow);
-    }
 }
