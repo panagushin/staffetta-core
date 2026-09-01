@@ -20,8 +20,9 @@ internal sealed record ProbeManifest(
     [property: JsonPropertyOrder(14)] bool ObservedCommandsTruncated,
     [property: JsonPropertyOrder(15)] IReadOnlyList<string> ObservedCommands,
     [property: JsonPropertyOrder(16)] N2Observations N2,
-    [property: JsonPropertyOrder(17)] HeadersEvidence Headers,
-    [property: JsonPropertyOrder(18)] IReadOnlyDictionary<string, string> StimulusClasses);
+    [property: JsonPropertyOrder(17)] AddressDiscoveryEvidence AddressDiscovery,
+    [property: JsonPropertyOrder(18)] HeadersEvidence Headers,
+    [property: JsonPropertyOrder(19)] IReadOnlyDictionary<string, string> StimulusClasses);
 
 internal sealed record PeerUserAgent(
     [property: JsonPropertyOrder(0)] string? SafeAscii,
@@ -34,6 +35,21 @@ internal sealed record N2Observations(
     [property: JsonPropertyOrder(2)] string BadMagicResync,
     [property: JsonPropertyOrder(3)] string HeadersExactLength,
     [property: JsonPropertyOrder(4)] string PingPongExactLength);
+
+internal sealed record AddressDiscoveryEvidence(
+    [property: JsonPropertyOrder(0)] string Request,
+    [property: JsonPropertyOrder(1)] string Response,
+    [property: JsonPropertyOrder(2)] string EndpointAuthority,
+    [property: JsonPropertyOrder(3)] int ConnectionAttempts,
+    [property: JsonPropertyOrder(4)] int AdvertisedRecordCount,
+    [property: JsonPropertyOrder(5)] IReadOnlyList<AdvertisedAddressEvidence> AdvertisedAddresses);
+
+internal sealed record AdvertisedAddressEvidence(
+    [property: JsonPropertyOrder(0)] uint TimestampUnixSeconds,
+    [property: JsonPropertyOrder(1)] string Services,
+    [property: JsonPropertyOrder(2)] string AddressFamily,
+    [property: JsonPropertyOrder(3)] string Address,
+    [property: JsonPropertyOrder(4)] ushort AdvertisedPort);
 
 internal sealed record HeadersEvidence(
     [property: JsonPropertyOrder(0)] long PayloadLength,

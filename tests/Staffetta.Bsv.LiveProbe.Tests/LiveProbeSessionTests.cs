@@ -2,6 +2,7 @@ using System.Buffers;
 using System.Buffers.Binary;
 using System.Net;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
+using Staffetta.Core.Protocol.Discovery;
 using Staffetta.Core.Protocol.Handshake;
 using Staffetta.Core.Protocol.Wire;
 
@@ -11,7 +12,7 @@ namespace Staffetta.Bsv.LiveProbe.Tests;
 public sealed class LiveProbeSessionTests
 {
     private static readonly string[] ExpectedOutboundCommands =
-        ["version", "verack", "protoconf", "ping", "getheaders", "pong"];
+        ["version", "verack", "protoconf", "getaddr", "ping", "getheaders", "pong"];
 
     private const string ActualLocator =
         "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f";
@@ -55,6 +56,13 @@ public sealed class LiveProbeSessionTests
             StringAssert.Contains(manifest, "\"PeerProtocolVersion\":70015");
             StringAssert.Contains(manifest, "\"ping\"");
             StringAssert.Contains(manifest, "\"headers\"");
+            StringAssert.Contains(manifest, "\"AddressDiscovery\"");
+            StringAssert.Contains(manifest, "\"EndpointAuthority\":\"peer_advertised_unverified\"");
+            StringAssert.Contains(manifest, "\"ConnectionAttempts\":0");
+            StringAssert.Contains(manifest, "\"Address\":\"203.0.113.9\"");
+            StringAssert.Contains(manifest, "\"AdvertisedPort\":18333");
+            StringAssert.Contains(manifest, "\"Address\":\"2001:db8::7\"");
+            StringAssert.Contains(manifest, "\"Services\":\"5\"");
             Assert.IsFalse(manifest.Contains("192.0.2.10:50000", StringComparison.Ordinal));
         }
         finally
@@ -85,6 +93,42 @@ public sealed class LiveProbeSessionTests
                     new Dictionary<string, long>(StringComparer.Ordinal),
                     CancellationToken.None));
 
+            Assert.IsFalse(Directory.Exists(output));
+            Assert.IsTrue(Directory.Exists(output + ".part"));
+            Assert.IsFalse(File.Exists(Path.Combine(output + ".part", "candidate.bin")));
+            Assert.IsFalse(File.Exists(Path.Combine(output + ".part", "candidate.json")));
+        }
+        finally
+        {
+            DeleteTestPaths(output);
+        }
+    }
+
+    [TestMethod]
+    public async Task NonCanonicalAddressResponseNeverPublishesFinalDirectory()
+    {
+        var output = CreateOutputPath();
+        try
+        {
+            var options = ParseOptions(output);
+            await using var artifact = CandidateArtifact.Create(output);
+            await using var peer = new ScriptedPeerStream(
+                GetFixturePayload(),
+                EncodeFrame("addr"u8, [0xfd, 0x01, 0x00]));
+
+            await Assert.ThrowsExceptionAsync<InvalidDataException>(() =>
+                LiveProbe.RunConnectedSessionAsync(
+                    options,
+                    peer,
+                    new IPEndPoint(IPAddress.Parse("192.0.2.10"), 50_000),
+                    options.Peer,
+                    artifact,
+                    new RepositorySnapshot("test-commit", "clean"),
+                    DateTimeOffset.UnixEpoch,
+                    new Dictionary<string, long>(StringComparer.Ordinal),
+                    CancellationToken.None));
+
+            Assert.AreEqual(1, peer.OutboundCommands.Count(command => command == "getaddr"));
             Assert.IsFalse(Directory.Exists(output));
             Assert.IsTrue(Directory.Exists(output + ".part"));
             Assert.IsFalse(File.Exists(Path.Combine(output + ".part", "candidate.bin")));
@@ -207,7 +251,30 @@ public sealed class LiveProbeSessionTests
         return frame;
     }
 
-    private sealed class ScriptedPeerStream(byte[] headersPayload) : Stream
+    private static byte[] EncodePeerAddresses()
+    {
+        Assert.IsTrue(NetworkAddress.TryCreateIpv4(
+            1,
+            [203, 0, 113, 9],
+            18_333,
+            out var ipv4));
+        var ipv6 = new NetworkAddress(
+            5,
+            [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7],
+            8_333);
+        LegacyAddressRecord[] records =
+        [
+            new(1_800_000_001, ipv4),
+            new(1_800_000_002, ipv6),
+        ];
+        Span<byte> payload = stackalloc byte[1 + (records.Length * LegacyAddressPayloadCodec.RecordLength)];
+        Assert.AreEqual(
+            OperationStatus.Done,
+            LegacyAddressPayloadCodec.TryWrite(records, payload, out var payloadLength));
+        return EncodeFrame("addr"u8, payload[..payloadLength]);
+    }
+
+    private sealed class ScriptedPeerStream(byte[] headersPayload, byte[]? addressFrame = null) : Stream
     {
         private readonly Queue<byte[]> _incoming = new();
         private int _incomingOffset;
@@ -300,7 +367,7 @@ public sealed class LiveProbeSessionTests
             var payload = frame[headerLength..];
             Assert.AreEqual((ulong)payload.Length, header.PayloadLength);
             Assert.AreEqual(MessageChecksum.Compute(payload), header.PayloadChecksum);
-            Assert.IsTrue(command is "version" or "verack" or "protoconf" or "ping" or "getheaders" or "pong");
+            Assert.IsTrue(command is "version" or "verack" or "protoconf" or "getaddr" or "ping" or "getheaders" or "pong");
             OutboundCommands.Add(command);
 
             switch (command)
@@ -326,6 +393,9 @@ public sealed class LiveProbeSessionTests
                         OperationStatus.Done,
                         ModernPingPongPayloadCodec.TryParse(payload, out var pingNonce));
                     _incoming.Enqueue(ProbeWireEncoder.EncodePong(pingNonce));
+                    break;
+                case "getaddr":
+                    _incoming.Enqueue(addressFrame ?? EncodePeerAddresses());
                     break;
                 case "getheaders":
                     _incoming.Enqueue(ProbeWireEncoder.EncodePing(999));

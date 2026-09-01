@@ -58,6 +58,8 @@ internal static class ProbeWireEncoder
 
     internal static byte[] EncodePong(ulong nonce) => EncodePingPong("pong"u8, nonce);
 
+    internal static byte[] EncodeGetAddr() => EncodeFrame("getaddr"u8, []);
+
     internal static byte[] EncodeGetHeaders(Hash256 locator)
     {
         Span<byte> payload = stackalloc byte[GetHeadersPayloadLength];

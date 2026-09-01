@@ -1,5 +1,6 @@
 using System.Buffers;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
+using Staffetta.Core.Protocol.Discovery;
 using Staffetta.Core.Protocol.Handshake;
 using Staffetta.Core.Protocol.Wire;
 
@@ -79,6 +80,38 @@ public sealed class ProbeTransportTests
             CancellationToken.None));
 
         Assert.AreEqual(0, candidate.Length);
+    }
+
+    [TestMethod]
+    public async Task OversizedLegacyAddressPayloadIsRejectedBeforeReadingPayload()
+    {
+        using var adapter = CreateStartedAdapter(localNonce: 1);
+        Span<byte> checksum = stackalloc byte[MessageChecksum.Length];
+        Assert.AreEqual(
+            OperationStatus.Done,
+            MessageHeader.TryCreateBasic(
+                "addr"u8,
+                LegacyAddressPayloadCodec.MaximumPayloadLength + 1,
+                checksum,
+                out var header));
+        var headerBytes = new byte[MessageHeaderCodec.BasicHeaderLength];
+        Assert.AreEqual(
+            OperationStatus.Done,
+            MessageHeaderCodec.TryWrite(
+                headerBytes,
+                ProbeWireEncoder.NetworkMagic,
+                header,
+                ProbeTransport.MaximumFramePayloadLength,
+                out _));
+        await using var stream = new MemoryStream(headerBytes, writable: false);
+
+        await Assert.ThrowsExceptionAsync<InvalidDataException>(() => ProbeTransport.ReceiveFrameAsync(
+            stream,
+            adapter,
+            null,
+            CancellationToken.None));
+
+        Assert.AreEqual(headerBytes.Length, stream.Position);
     }
 
     private static BsvHandshakeIngressAdapter CreateStartedAdapter(ulong localNonce)

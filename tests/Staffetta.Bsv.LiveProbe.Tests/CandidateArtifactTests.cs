@@ -115,7 +115,7 @@ public sealed class CandidateArtifactTests
 
     private static ProbeManifest CreateManifest(ProbeOptions options, HeadersEvidence evidence) =>
         new(
-            1,
+            2,
             "commit",
             "dirty",
             ".NET test",
@@ -132,6 +132,13 @@ public sealed class CandidateArtifactTests
             false,
             ["headers"],
             new N2Observations("absent", "not_observed", "not_stimulated_by_policy", "validated_exact", "validated_exact"),
+            new AddressDiscoveryEvidence(
+                "executed_once",
+                "observed_and_parsed",
+                "peer_advertised_unverified",
+                0,
+                0,
+                []),
             evidence,
             new Dictionary<string, string> { ["transaction_broadcast"] = "not_run_by_policy" });
 

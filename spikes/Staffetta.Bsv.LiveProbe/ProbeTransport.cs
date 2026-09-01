@@ -1,6 +1,7 @@
 using System.Buffers;
 using System.Net.Sockets;
 using System.Text;
+using Staffetta.Core.Protocol.Discovery;
 using Staffetta.Core.Protocol.Handshake;
 using Staffetta.Core.Protocol.Wire;
 
@@ -39,6 +40,11 @@ internal static class ProbeTransport
             throw new InvalidDataException("The peer advertised an oversized headers payload.");
         }
 
+        if (command == "addr" && header.PayloadLength > LegacyAddressPayloadCodec.MaximumPayloadLength)
+        {
+            throw new InvalidDataException("The peer advertised an oversized legacy addr payload.");
+        }
+
         var adapterStatus = adapter.Consume(headerBytes, out var headerBytesConsumed);
         if (headerBytesConsumed != headerBytes.Length ||
             (header.PayloadLength == 0
@@ -48,7 +54,7 @@ internal static class ProbeTransport
             throw new InvalidDataException("Handshake ingress rejected the message header.");
         }
 
-        var retainedPayloadLength = command == "version"
+        var retainedPayloadLength = command is "version" or "addr"
             ? checked((int)header.PayloadLength)
             : 0;
         var retainedPayload = retainedPayloadLength == 0 ? [] : new byte[retainedPayloadLength];

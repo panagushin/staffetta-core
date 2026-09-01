@@ -5,6 +5,7 @@ using System.Net.Sockets;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
+using Staffetta.Core.Protocol.Discovery;
 using Staffetta.Core.Protocol.Handshake;
 
 namespace Staffetta.Bsv.LiveProbe;
@@ -13,9 +14,10 @@ internal static class LiveProbe
 {
     private static readonly TimeSpan ConnectTimeout = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan HandshakeTimeout = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan AddressDiscoveryTimeout = TimeSpan.FromSeconds(15);
     private static readonly TimeSpan PingTimeout = TimeSpan.FromSeconds(10);
     private static readonly TimeSpan HeadersTimeout = TimeSpan.FromSeconds(30);
-    private static readonly TimeSpan TotalTimeout = TimeSpan.FromSeconds(75);
+    private static readonly TimeSpan TotalTimeout = TimeSpan.FromSeconds(90);
 
     internal static async Task RunAsync(ProbeOptions options, CancellationToken cancellationToken)
     {
@@ -102,6 +104,38 @@ internal static class LiveProbe
                         session,
                         token).ConfigureAwait(false);
                     EnsureNegotiating(adapter);
+                }
+            },
+            cancellationToken).ConfigureAwait(false);
+
+        await RunPhaseAsync(
+            "address_discovery",
+            AddressDiscoveryTimeout,
+            durations,
+            async token =>
+            {
+                await ProbeTransport.SendAsync(stream, ProbeWireEncoder.EncodeGetAddr(), token)
+                    .ConfigureAwait(false);
+                while (session.AddressDiscovery is null)
+                {
+                    var frame = await ProbeTransport.ReceiveFrameAsync(stream, adapter, null, token)
+                        .ConfigureAwait(false);
+                    session.ObserveCommand(frame.Command);
+                    ObserveVersion(frame, session);
+                    if (frame.Command == "addr")
+                    {
+                        session.AddressDiscovery = ParseAddressDiscovery(frame.RetainedPayload);
+                    }
+
+                    await SendPendingOutputsAsync(
+                        adapter,
+                        stream,
+                        remoteAddress,
+                        localAddress,
+                        localNonce,
+                        session,
+                        token).ConfigureAwait(false);
+                    EnsureReady(adapter);
                 }
             },
             cancellationToken).ConfigureAwait(false);
@@ -301,7 +335,7 @@ internal static class LiveProbe
         HeadersEvidence headers,
         IPEndPoint resolvedRemote) =>
         new(
-            Schema: 1,
+            Schema: 2,
             repository.Commit,
             repository.State,
             RuntimeInformation.FrameworkDescription,
@@ -323,15 +357,64 @@ internal static class LiveProbe
                 "not_stimulated_by_policy",
                 "validated_exact",
                 session.ObservedPeerPing ? "validated_peer_ping_and_pong" : "validated_probe_ping_and_peer_pong"),
+            session.AddressDiscovery ?? throw new InvalidOperationException(
+                "Address-discovery evidence was not recorded."),
             headers,
             new Dictionary<string, string>(StringComparer.Ordinal)
             {
                 ["normal_handshake"] = "executed",
+                ["legacy_getaddr"] = "executed_once",
                 ["ping_round_trip"] = session.PingAcknowledged ? "executed" : "failed",
                 ["headers_request"] = "executed_once",
                 ["malformed_peer_traffic"] = "not_run_by_policy",
                 ["transaction_broadcast"] = "not_run_by_policy",
             });
+
+    private static AddressDiscoveryEvidence ParseAddressDiscovery(ReadOnlySpan<byte> payload)
+    {
+        var records = new LegacyAddressRecord[LegacyAddressPayloadCodec.MaximumRecordCount];
+        var status = LegacyAddressPayloadCodec.TryParse(
+            payload,
+            records,
+            out var count,
+            out var bytesConsumed);
+        if (status != OperationStatus.Done || bytesConsumed != payload.Length)
+        {
+            throw new InvalidDataException($"Legacy addr payload parsing failed with status {status}.");
+        }
+
+        var advertised = new AdvertisedAddressEvidence[count];
+        for (var index = 0; index < count; index++)
+        {
+            advertised[index] = NormalizeAddress(records[index]);
+        }
+
+        return new AddressDiscoveryEvidence(
+            "executed_once",
+            "observed_and_parsed",
+            "peer_advertised_unverified",
+            ConnectionAttempts: 0,
+            count,
+            advertised);
+    }
+
+    private static AdvertisedAddressEvidence NormalizeAddress(LegacyAddressRecord record)
+    {
+        Span<byte> addressBytes = stackalloc byte[16];
+        var isIpv4 = record.Address.TryWriteIpv4(addressBytes);
+        if (!isIpv4 && !record.Address.TryWriteAddress(addressBytes))
+        {
+            throw new InvalidDataException("A parsed legacy address could not be normalized.");
+        }
+
+        var length = isIpv4 ? sizeof(uint) : 16;
+        return new AdvertisedAddressEvidence(
+            record.TimestampUnixSeconds,
+            record.Address.Services.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            isIpv4 ? "ipv4" : "ipv6",
+            new IPAddress(addressBytes[..length]).ToString(),
+            record.Address.Port);
+    }
 
     private static async Task RunPhaseAsync(
         string name,
@@ -420,6 +503,8 @@ internal static class LiveProbe
         internal bool ObservedPeerPing { get; set; }
 
         internal bool PingAcknowledged { get; set; }
+
+        internal AddressDiscoveryEvidence? AddressDiscovery { get; set; }
 
         internal long ObservedCommandCount { get; private set; }
 

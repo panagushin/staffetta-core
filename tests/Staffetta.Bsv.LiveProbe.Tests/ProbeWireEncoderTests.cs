@@ -65,6 +65,7 @@ public sealed class ProbeWireEncoderTests
     public void FixedControlFramesHaveExactCommandsAndPayloads()
     {
         Assert.AreEqual(0, ParseFrame(ProbeWireEncoder.EncodeVerack(), "verack").Length);
+        Assert.AreEqual(0, ParseFrame(ProbeWireEncoder.EncodeGetAddr(), "getaddr").Length);
         Assert.AreEqual(8, ParseFrame(ProbeWireEncoder.EncodePing(42), "ping").Length);
         Assert.AreEqual(8, ParseFrame(ProbeWireEncoder.EncodePong(42), "pong").Length);
     }
