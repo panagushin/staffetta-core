@@ -200,7 +200,7 @@ public sealed class BsvPeerSessionIngressAdapterStressTests
         Assert.AreEqual(OperationStatus.Done, session.StartBroadcast(transactionId));
         Assert.AreEqual(OperationStatus.Done, session.DrainBroadcastOutputs(outputs, out var written));
         Assert.AreEqual(1, written);
-        Assert.AreEqual(OperationStatus.Done, session.ApplyInventoryWriteCommitted(transactionId));
+        Assert.AreEqual(OperationStatus.Done, CommitInventoryEgress(session, transactionId));
         Assert.AreEqual(OperationStatus.Done, session.DrainBroadcastOutputs(outputs, out written));
         Assert.AreEqual(1, written);
     }
@@ -441,6 +441,26 @@ public sealed class BsvPeerSessionIngressAdapterStressTests
         destination[0] = 0xff;
         BinaryPrimitives.WriteUInt64LittleEndian(destination[1..], value);
         return 9;
+    }
+
+    private static OperationStatus CommitInventoryEgress(
+        BsvPeerSessionIngressAdapter session,
+        Hash256 transactionId)
+    {
+        var status = session.PlanBroadcastEgress(
+            new BsvTransactionBroadcastOutput(
+                BsvTransactionBroadcastOutputKind.SendInventory,
+                transactionId),
+            out _);
+        while (status == OperationStatus.Done && !session.PendingEgressSegment.IsEmpty)
+        {
+            var pending = session.PendingEgressSegment;
+            status = session.AcknowledgeEgress(pending, pending.Length);
+        }
+
+        return status == OperationStatus.Done
+            ? session.CommitEgressCompletion()
+            : status;
     }
 
     private static byte[] CreateVersionPayload()

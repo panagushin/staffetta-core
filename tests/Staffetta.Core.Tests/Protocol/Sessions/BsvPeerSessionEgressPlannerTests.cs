@@ -20,7 +20,7 @@ public sealed class BsvPeerSessionEgressPlannerTests
         const ulong nonce = 0x0102_0304_0506_0708;
         var transactionId = Hash256.DoubleSha256("correlation"u8);
 
-        using (var planner = new BsvPeerSessionEgressPlanner(Magic))
+        using (var planner = CreatePlanner())
         {
             var version = CreateVersion(nonce);
             Assert.AreEqual(
@@ -53,7 +53,7 @@ public sealed class BsvPeerSessionEgressPlannerTests
             noncePayload,
             BsvPeerSessionSendKind.Ping);
 
-        using (var planner = new BsvPeerSessionEgressPlanner(Magic))
+        using (var planner = CreatePlanner())
         {
             Assert.AreEqual(
                 OperationStatus.Done,
@@ -82,7 +82,7 @@ public sealed class BsvPeerSessionEgressPlannerTests
             OperationStatus.Done,
             InventoryPayloadCodec.TryWrite(vector, inventoryPayload, 37, out var inventoryLength));
 
-        using (var planner = new BsvPeerSessionEgressPlanner(Magic))
+        using (var planner = CreatePlanner())
         {
             Assert.AreEqual(
                 OperationStatus.Done,
@@ -102,7 +102,7 @@ public sealed class BsvPeerSessionEgressPlannerTests
                 commitKind: BsvPeerSessionRelayWriteCommitKind.Inventory);
         }
 
-        using (var planner = new BsvPeerSessionEgressPlanner(Magic))
+        using (var planner = CreatePlanner())
         {
             Assert.AreEqual(
                 OperationStatus.Done,
@@ -132,13 +132,13 @@ public sealed class BsvPeerSessionEgressPlannerTests
                      new BsvHandshakeOutput(BsvHandshakeOutputKind.ForwardReject),
                  })
         {
-            using var planner = new BsvPeerSessionEgressPlanner(Magic);
+            using var planner = CreatePlanner();
             Assert.AreEqual(
                 OperationStatus.Done,
                 planner.PlanHandshake(output, ulong.MaxValue, out var disposition));
             Assert.AreEqual(BsvPeerSessionOutputDisposition.Fact, disposition);
             Assert.IsTrue(planner.PendingSegment.IsEmpty);
-            Assert.IsFalse(planner.TryConsumeCompletion(out _));
+            Assert.IsFalse(planner.TryPeekCompletion(out _));
         }
 
         foreach (var kind in new[]
@@ -150,7 +150,7 @@ public sealed class BsvPeerSessionEgressPlannerTests
                      BsvTransactionBroadcastOutputKind.Rejected,
                  })
         {
-            using var planner = new BsvPeerSessionEgressPlanner(Magic);
+            using var planner = CreatePlanner();
             Assert.AreEqual(
                 OperationStatus.Done,
                 planner.PlanBroadcast(
@@ -169,7 +169,7 @@ public sealed class BsvPeerSessionEgressPlannerTests
                      BsvTransactionFetchOutputKind.NotFound,
                  })
         {
-            using var planner = new BsvPeerSessionEgressPlanner(Magic);
+            using var planner = CreatePlanner();
             Assert.AreEqual(
                 OperationStatus.Done,
                 planner.PlanFetch(
@@ -186,7 +186,7 @@ public sealed class BsvPeerSessionEgressPlannerTests
     {
         byte[] transaction = [1, 2, 3, 4, 5, 6, 7, 8, 9];
         var transactionId = Hash256.DoubleSha256(transaction);
-        using var planner = new BsvPeerSessionEgressPlanner(Magic);
+        using var planner = CreatePlanner();
 
         Assert.AreEqual(
             OperationStatus.Done,
@@ -200,19 +200,20 @@ public sealed class BsvPeerSessionEgressPlannerTests
 
         var wire = new List<byte>();
         DrainPendingOneByte(planner, wire);
-        Assert.IsFalse(planner.TryConsumeCompletion(out _));
+        Assert.IsFalse(planner.TryPeekCompletion(out _));
 
         Assert.AreEqual(OperationStatus.Done, planner.ProvideTransactionChunk(transaction.AsMemory(0, 3)));
         DrainPendingOneByte(planner, wire);
-        Assert.IsFalse(planner.TryConsumeCompletion(out _));
+        Assert.IsFalse(planner.TryPeekCompletion(out _));
         Assert.AreEqual(OperationStatus.Done, planner.ProvideTransactionChunk(transaction.AsMemory(3)));
         DrainPendingOneByte(planner, wire);
 
-        Assert.IsTrue(planner.TryConsumeCompletion(out var completion));
+        Assert.IsTrue(planner.TryPeekCompletion(out var completion));
         Assert.AreEqual(BsvPeerSessionSendKind.Transaction, completion.SendKind);
         Assert.AreEqual(BsvPeerSessionRelayWriteCommitKind.Transaction, completion.RelayWriteCommitKind);
         Assert.AreEqual(transactionId, completion.TransactionId);
         Assert.AreEqual(OperationStatus.Done, planner.EndTransactionPayload());
+        Assert.AreEqual(OperationStatus.Done, planner.CommitCompletion());
 
         var bytes = wire.ToArray();
         Assert.AreEqual(
@@ -230,7 +231,7 @@ public sealed class BsvPeerSessionEgressPlannerTests
         byte[] payload = [1, 2, 3];
         var actual = Hash256.DoubleSha256(payload);
         var wrong = Hash256.DoubleSha256("wrong"u8);
-        using (var planner = new BsvPeerSessionEgressPlanner(Magic))
+        using (var planner = CreatePlanner())
         {
             Assert.AreEqual(
                 OperationStatus.Done,
@@ -243,10 +244,10 @@ public sealed class BsvPeerSessionEgressPlannerTests
             Assert.AreEqual(OperationStatus.Done, planner.ProvideTransactionChunk(payload));
             Assert.AreEqual(OperationStatus.InvalidData, DrainPendingOneByte(planner, null));
             Assert.AreEqual(BsvPeerSessionEgressState.Faulted, planner.State);
-            Assert.IsFalse(planner.TryConsumeCompletion(out _));
+            Assert.IsFalse(planner.TryPeekCompletion(out _));
         }
 
-        using (var planner = new BsvPeerSessionEgressPlanner(Magic))
+        using (var planner = CreatePlanner())
         {
             Assert.AreEqual(
                 OperationStatus.Done,
@@ -262,7 +263,7 @@ public sealed class BsvPeerSessionEgressPlannerTests
             Assert.AreEqual(BsvPeerSessionEgressState.Faulted, planner.State);
         }
 
-        using (var planner = new BsvPeerSessionEgressPlanner(Magic))
+        using (var planner = CreatePlanner())
         {
             Assert.AreEqual(
                 OperationStatus.Done,
@@ -281,7 +282,7 @@ public sealed class BsvPeerSessionEgressPlannerTests
     public void BasicAndExtendedTransactionBoundaryUseExactHeaderFormatsWithoutLargeAllocation()
     {
         var transactionId = Hash256.DoubleSha256("boundary"u8);
-        using (var basic = new BsvPeerSessionEgressPlanner(Magic))
+        using (var basic = CreatePlanner())
         {
             Assert.AreEqual(
                 OperationStatus.Done,
@@ -296,7 +297,7 @@ public sealed class BsvPeerSessionEgressPlannerTests
             Assert.AreEqual(OperationStatus.Done, basic.Abort());
         }
 
-        using (var extended = new BsvPeerSessionEgressPlanner(Magic))
+        using (var extended = CreatePlanner())
         {
             Assert.AreEqual(
                 OperationStatus.Done,
@@ -333,7 +334,7 @@ public sealed class BsvPeerSessionEgressPlannerTests
     [TestMethod]
     public void StaleLeaseWrongOutputAndPrematureReuseFaultWithoutCompletion()
     {
-        using (var planner = new BsvPeerSessionEgressPlanner(Magic))
+        using (var planner = CreatePlanner())
         {
             Assert.AreEqual(
                 OperationStatus.Done,
@@ -345,10 +346,10 @@ public sealed class BsvPeerSessionEgressPlannerTests
             Assert.AreEqual(OperationStatus.Done, planner.Acknowledge(stale, 1));
             Assert.AreEqual(OperationStatus.InvalidData, planner.Acknowledge(stale, 1));
             Assert.AreEqual(BsvPeerSessionEgressState.Faulted, planner.State);
-            Assert.IsFalse(planner.TryConsumeCompletion(out _));
+            Assert.IsFalse(planner.TryPeekCompletion(out _));
         }
 
-        using (var planner = new BsvPeerSessionEgressPlanner(Magic))
+        using (var planner = CreatePlanner())
         {
             Assert.AreEqual(
                 OperationStatus.InvalidData,
@@ -359,7 +360,7 @@ public sealed class BsvPeerSessionEgressPlannerTests
             Assert.AreEqual(BsvPeerSessionEgressState.Faulted, planner.State);
         }
 
-        using (var planner = new BsvPeerSessionEgressPlanner(Magic))
+        using (var planner = CreatePlanner())
         {
             Assert.AreEqual(
                 OperationStatus.Done,
@@ -380,7 +381,7 @@ public sealed class BsvPeerSessionEgressPlannerTests
     [TestMethod]
     public void NegotiatedMaximumAndZeroValueOutputsAreEnforced()
     {
-        using (var fixedFrame = new BsvPeerSessionEgressPlanner(Magic))
+        using (var fixedFrame = CreatePlanner())
         {
             Assert.AreEqual(
                 OperationStatus.InvalidData,
@@ -392,7 +393,7 @@ public sealed class BsvPeerSessionEgressPlannerTests
         }
 
         var transactionId = Hash256.DoubleSha256([1, 2, 3]);
-        using (var transaction = new BsvPeerSessionEgressPlanner(Magic))
+        using (var transaction = CreatePlanner())
         {
             Assert.AreEqual(
                 OperationStatus.InvalidData,
@@ -406,7 +407,7 @@ public sealed class BsvPeerSessionEgressPlannerTests
             Assert.AreEqual(BsvPeerSessionEgressState.Faulted, transaction.State);
         }
 
-        using (var verack = new BsvPeerSessionEgressPlanner(Magic))
+        using (var verack = CreatePlanner())
         {
             Assert.AreEqual(
                 OperationStatus.InvalidData,
@@ -416,7 +417,7 @@ public sealed class BsvPeerSessionEgressPlannerTests
                     out _));
         }
 
-        using (var protoconf = new BsvPeerSessionEgressPlanner(Magic))
+        using (var protoconf = CreatePlanner())
         {
             Assert.AreEqual(
                 OperationStatus.InvalidData,
@@ -430,9 +431,13 @@ public sealed class BsvPeerSessionEgressPlannerTests
     }
 
     [TestMethod]
-    public void CompletionIsOneShotGenerationBoundAndMustBeConsumedBeforeReset()
+    public void CompletionIsGenerationBoundAndDestinationBackpressurePreservesRetry()
     {
-        using var planner = new BsvPeerSessionEgressPlanner(Magic);
+        var owner = new RecordingCompletionOwner
+        {
+            NextStatus = OperationStatus.DestinationTooSmall,
+        };
+        using var planner = CreatePlanner(owner);
         Assert.AreEqual(
             OperationStatus.Done,
             planner.PlanHandshake(
@@ -440,27 +445,21 @@ public sealed class BsvPeerSessionEgressPlannerTests
                 ulong.MaxValue,
                 out _));
         DrainPendingOneByte(planner, null);
-        Assert.AreEqual(OperationStatus.InvalidData, planner.Reset());
-
-        using var reusable = new BsvPeerSessionEgressPlanner(Magic);
+        Assert.IsTrue(planner.TryPeekCompletion(out var first));
+        Assert.AreEqual(OperationStatus.DestinationTooSmall, planner.CommitCompletion());
+        Assert.IsTrue(planner.TryPeekCompletion(out var retry));
+        Assert.AreEqual(first, retry);
+        owner.NextStatus = OperationStatus.Done;
+        Assert.AreEqual(OperationStatus.Done, planner.CommitCompletion());
+        Assert.IsFalse(planner.TryPeekCompletion(out _));
         Assert.AreEqual(
             OperationStatus.Done,
-            reusable.PlanHandshake(
+            planner.PlanHandshake(
                 new BsvHandshakeOutput(BsvHandshakeOutputKind.SendVerack),
                 ulong.MaxValue,
                 out _));
-        DrainPendingOneByte(reusable, null);
-        Assert.IsTrue(reusable.TryConsumeCompletion(out var first));
-        Assert.IsFalse(reusable.TryConsumeCompletion(out _));
-        Assert.AreEqual(OperationStatus.Done, reusable.Reset());
-        Assert.AreEqual(
-            OperationStatus.Done,
-            reusable.PlanHandshake(
-                new BsvHandshakeOutput(BsvHandshakeOutputKind.SendVerack),
-                ulong.MaxValue,
-                out _));
-        DrainPendingOneByte(reusable, null);
-        Assert.IsTrue(reusable.TryConsumeCompletion(out var second));
+        DrainPendingOneByte(planner, null);
+        Assert.IsTrue(planner.TryPeekCompletion(out var second));
         Assert.AreNotEqual(first.PlanId, second.PlanId);
         Assert.IsTrue(second.PlanId > first.PlanId);
     }
@@ -469,7 +468,7 @@ public sealed class BsvPeerSessionEgressPlannerTests
     public void WarmFixedFrameCyclesHaveNoPerCycleManagedAllocation()
     {
         var transactionId = Hash256.DoubleSha256("allocation"u8);
-        using var planner = new BsvPeerSessionEgressPlanner(Magic);
+        using var planner = CreatePlanner();
         for (var index = 0; index < 32; index++)
         {
             RunInventoryCycle(planner, transactionId);
@@ -495,7 +494,7 @@ public sealed class BsvPeerSessionEgressPlannerTests
         }
 
         var transactionId = Hash256.DoubleSha256(payload);
-        using var planner = new BsvPeerSessionEgressPlanner(Magic);
+        using var planner = CreatePlanner();
         Assert.AreEqual(
             OperationStatus.Done,
             planner.PlanTransaction(
@@ -521,7 +520,8 @@ public sealed class BsvPeerSessionEgressPlannerTests
         var allocated = GC.GetAllocatedBytesForCurrentThread() - before;
         Assert.AreEqual(0L, allocated);
         Assert.AreEqual(OperationStatus.Done, planner.Acknowledge(planner.PendingSegment, 1));
-        Assert.IsTrue(planner.TryConsumeCompletion(out _));
+        Assert.IsTrue(planner.TryPeekCompletion(out _));
+        Assert.AreEqual(OperationStatus.Done, planner.CommitCompletion());
     }
 
     private static void AssertHandshakeFrame(
@@ -530,7 +530,7 @@ public sealed class BsvPeerSessionEgressPlannerTests
         ReadOnlySpan<byte> expectedPayload,
         BsvPeerSessionSendKind sendKind)
     {
-        using var planner = new BsvPeerSessionEgressPlanner(Magic);
+        using var planner = CreatePlanner();
         Assert.AreEqual(
             OperationStatus.Done,
             planner.PlanHandshake(output, ulong.MaxValue, out var disposition));
@@ -563,7 +563,8 @@ public sealed class BsvPeerSessionEgressPlannerTests
         Assert.AreEqual((ulong)expectedPayload.Length, header.PayloadLength);
         Assert.AreEqual(MessageChecksum.Compute(expectedPayload), header.PayloadChecksum);
         CollectionAssert.AreEqual(expectedPayload.ToArray(), encoded[headerLength..]);
-        Assert.IsTrue(planner.TryConsumeCompletion(out var completion));
+        Assert.IsTrue(planner.TryPeekCompletion(out var completion));
+        Assert.AreEqual(OperationStatus.Done, planner.CommitCompletion());
         Assert.AreEqual(sendKind, completion.SendKind);
         Assert.AreEqual(commitKind, completion.RelayWriteCommitKind);
         Assert.AreEqual(transactionId, completion.TransactionId);
@@ -606,13 +607,17 @@ public sealed class BsvPeerSessionEgressPlannerTests
 
         if (status == OperationStatus.Done)
         {
-            status = planner.TryConsumeCompletion(out _)
-                ? planner.Reset()
+            status = planner.TryPeekCompletion(out _)
+                ? planner.CommitCompletion()
                 : OperationStatus.InvalidData;
         }
 
         Assert.AreEqual(OperationStatus.Done, status);
     }
+
+    private static BsvPeerSessionEgressPlanner CreatePlanner(
+        RecordingCompletionOwner? owner = null) =>
+        new(Magic, owner ?? new RecordingCompletionOwner());
 
     private static VersionPayload CreateVersion(ulong nonce)
     {
@@ -627,5 +632,13 @@ public sealed class BsvPeerSessionEgressPlannerTests
             "/staffetta/"u8,
             startHeight: 900_000,
             relay: true);
+    }
+
+    private sealed class RecordingCompletionOwner : IBsvPeerSessionEgressCompletionOwner
+    {
+        internal OperationStatus NextStatus { get; set; } = OperationStatus.Done;
+
+        public OperationStatus ApplyEgressCompletion(
+            in BsvPeerSessionEgressCompletion completion) => NextStatus;
     }
 }

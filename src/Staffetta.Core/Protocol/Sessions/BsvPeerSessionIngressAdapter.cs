@@ -13,8 +13,9 @@ namespace Staffetta.Core.Protocol.Sessions;
 /// </summary>
 /// <remarks>
 /// Instances are single-consumer and not thread-safe. Every pending output must be drained before
-/// more input is consumed. Draining a send intent never acknowledges a transport write; callers
-/// must apply the corresponding write-committed method only after the full write succeeds.
+/// more input is consumed. Draining a send intent never acknowledges a transport write; relay
+/// write facts enter the session only through its owned egress planner after the exact frame is
+/// fully acknowledged.
 /// Transaction sink callbacks remain provisional until both the transaction structure and its
 /// enclosing frame are validated.
 /// </remarks>
@@ -22,6 +23,7 @@ public sealed class BsvPeerSessionIngressAdapter :
     IMessageIngressSink,
     IMessageIngressAdmissionPolicy,
     IMessageIngressPayloadHashPolicy,
+    IBsvPeerSessionEgressCompletionOwner,
     IDisposable
 {
     public const ulong MaximumInventoryCount = BsvPeerSessionFrameProcessor.MaximumInventoryCount;
@@ -34,11 +36,13 @@ public sealed class BsvPeerSessionIngressAdapter :
 
     private readonly BsvPeerSessionFrameProcessor _processor;
     private readonly MessageIngressStateMachine _ingress;
+    private readonly BsvPeerSessionEgressPlanner _egress;
 
     private bool _isOperating;
     private bool _callbackReentryDetected;
     private bool _isIngressUnusable;
     private bool _isCompleted;
+    private bool _isEgressDisposed;
     private bool _isDisposed;
 
     public BsvPeerSessionIngressAdapter(
@@ -58,6 +62,7 @@ public sealed class BsvPeerSessionIngressAdapter :
             _processor,
             _processor,
             _processor);
+        _egress = new BsvPeerSessionEgressPlanner(expectedNetworkMagic, this);
     }
 
     public BsvHandshakeState HandshakeState => _processor.HandshakeState;
@@ -154,55 +159,170 @@ public sealed class BsvPeerSessionIngressAdapter :
         return _processor.StartFetch(transactionId);
     }
 
-    /// <summary>Records that the complete inventory send intent reached the transport.</summary>
-    public OperationStatus ApplyInventoryWriteCommitted(Hash256 transactionId)
+    internal BsvPeerSessionEgressState EgressState => _egress.State;
+
+    internal MessageFrameWriteSegment PendingEgressSegment => _egress.PendingSegment;
+
+    internal OperationStatus PlanHandshakeEgress(
+        in BsvHandshakeOutput output,
+        out BsvPeerSessionOutputDisposition disposition)
     {
         ThrowIfUnavailable();
-        if (!CanApplyReadyTransition())
+        if (!CanPlanEgress(requireReady: false, out var blockedStatus))
         {
-            return OperationStatus.InvalidData;
+            disposition = BsvPeerSessionOutputDisposition.Send;
+            return blockedStatus;
         }
 
-        if (HasPendingOutputs)
-        {
-            return OperationStatus.DestinationTooSmall;
-        }
-
-        return _processor.ApplyInventoryWriteCommitted(transactionId);
+        return _egress.PlanHandshake(
+            output,
+            EffectivePeerMaximumReceivePayloadLength,
+            out disposition);
     }
 
-    /// <summary>Records that the complete transaction send intent reached the transport.</summary>
-    public OperationStatus ApplyTransactionWriteCommitted(Hash256 transactionId)
+    internal OperationStatus PlanVersionEgress(
+        in BsvHandshakeOutput output,
+        VersionPayload payload)
     {
         ThrowIfUnavailable();
-        if (!CanApplyReadyTransition())
-        {
-            return OperationStatus.InvalidData;
-        }
-
-        if (HasPendingOutputs)
-        {
-            return OperationStatus.DestinationTooSmall;
-        }
-
-        return _processor.ApplyTransactionWriteCommitted(transactionId);
+        return CanPlanEgress(requireReady: false, out var blockedStatus)
+            ? _egress.PlanVersion(output, payload, EffectivePeerMaximumReceivePayloadLength)
+            : blockedStatus;
     }
 
-    /// <summary>Records that the complete getdata send intent reached the transport.</summary>
-    public OperationStatus ApplyGetDataWriteCommitted(Hash256 transactionId)
+    internal OperationStatus PlanProtoconfEgress(
+        in BsvHandshakeOutput output,
+        uint maximumReceivePayloadLength,
+        ReadOnlySpan<byte> streamPolicies,
+        bool includeStreamPolicies)
     {
         ThrowIfUnavailable();
-        if (!CanApplyReadyTransition())
+        return CanPlanEgress(requireReady: false, out var blockedStatus)
+            ? _egress.PlanProtoconf(
+                output,
+                maximumReceivePayloadLength,
+                streamPolicies,
+                includeStreamPolicies,
+                EffectivePeerMaximumReceivePayloadLength)
+            : blockedStatus;
+    }
+
+    internal OperationStatus PlanBroadcastEgress(
+        in BsvTransactionBroadcastOutput output,
+        out BsvPeerSessionOutputDisposition disposition)
+    {
+        ThrowIfUnavailable();
+        if (!CanPlanEgress(requireReady: true, out var blockedStatus))
+        {
+            disposition = BsvPeerSessionOutputDisposition.Send;
+            return blockedStatus;
+        }
+
+        if (!_processor.CanPlanBroadcastEgress(output))
+        {
+            disposition = BsvPeerSessionOutputDisposition.Send;
+            return OperationStatus.InvalidData;
+        }
+
+        return _egress.PlanBroadcast(
+            output,
+            EffectivePeerMaximumReceivePayloadLength,
+            out disposition);
+    }
+
+    internal OperationStatus PlanTransactionEgress(
+        in BsvTransactionBroadcastOutput output,
+        ulong payloadLength,
+        Hash256 expectedTransactionId)
+    {
+        ThrowIfUnavailable();
+        if (!CanPlanEgress(requireReady: true, out var blockedStatus))
+        {
+            return blockedStatus;
+        }
+
+        return _processor.CanPlanBroadcastEgress(output)
+            ? _egress.PlanTransaction(
+                output,
+                payloadLength,
+                expectedTransactionId,
+                EffectivePeerMaximumReceivePayloadLength)
+            : OperationStatus.InvalidData;
+    }
+
+    internal OperationStatus PlanFetchEgress(
+        in BsvTransactionFetchOutput output,
+        out BsvPeerSessionOutputDisposition disposition)
+    {
+        ThrowIfUnavailable();
+        if (!CanPlanEgress(requireReady: true, out var blockedStatus))
+        {
+            disposition = BsvPeerSessionOutputDisposition.Send;
+            return blockedStatus;
+        }
+
+        if (!_processor.CanPlanFetchEgress(output))
+        {
+            disposition = BsvPeerSessionOutputDisposition.Send;
+            return OperationStatus.InvalidData;
+        }
+
+        return _egress.PlanFetch(
+            output,
+            EffectivePeerMaximumReceivePayloadLength,
+            out disposition);
+    }
+
+    internal OperationStatus ProvideTransactionEgressChunk(ReadOnlyMemory<byte> chunk)
+    {
+        ThrowIfUnavailable();
+        return CanUseEgress()
+            ? _egress.ProvideTransactionChunk(chunk)
+            : OperationStatus.InvalidData;
+    }
+
+    internal OperationStatus AcknowledgeEgress(
+        in MessageFrameWriteSegment segment,
+        int bytesWritten)
+    {
+        ThrowIfUnavailable();
+        return CanUseEgress()
+            ? _egress.Acknowledge(segment, bytesWritten)
+            : OperationStatus.InvalidData;
+    }
+
+    internal OperationStatus EndTransactionEgressPayload()
+    {
+        ThrowIfUnavailable();
+        return CanUseEgress()
+            ? _egress.EndTransactionPayload()
+            : OperationStatus.InvalidData;
+    }
+
+    internal OperationStatus CommitEgressCompletion()
+    {
+        ThrowIfUnavailable();
+        if (_isCompleted || _isIngressUnusable)
         {
             return OperationStatus.InvalidData;
         }
 
-        if (HasPendingOutputs)
+        var status = _egress.CommitCompletion();
+        if (status == OperationStatus.InvalidData)
         {
-            return OperationStatus.DestinationTooSmall;
+            _isIngressUnusable = true;
+            TerminateSession(BsvPeerSessionTerminationCause.ExternalFailure);
         }
 
-        return _processor.ApplyGetDataWriteCommitted(transactionId);
+        return status;
+    }
+
+    internal OperationStatus AbortEgress()
+    {
+        ThrowIfUnavailable();
+        return CanUseEgress()
+            ? _egress.Abort()
+            : OperationStatus.InvalidData;
     }
 
     /// <summary>Consumes no more than one complete wire frame.</summary>
@@ -232,7 +352,7 @@ public sealed class BsvPeerSessionIngressAdapter :
         catch
         {
             _isIngressUnusable = true;
-            _processor.Terminate(BsvPeerSessionTerminationCause.ExternalFailure);
+            TerminateSession(BsvPeerSessionTerminationCause.ExternalFailure);
             throw;
         }
         finally
@@ -245,7 +365,7 @@ public sealed class BsvPeerSessionIngressAdapter :
             _processor.FrameProcessingFailed)
         {
             _isIngressUnusable = true;
-            _processor.Terminate(BsvPeerSessionTerminationCause.WireViolation);
+            TerminateSession(BsvPeerSessionTerminationCause.WireViolation);
             if (!_processor.FrameAborted)
             {
                 _processor.ApplyWireViolation();
@@ -304,7 +424,7 @@ public sealed class BsvPeerSessionIngressAdapter :
         catch
         {
             _isIngressUnusable = true;
-            _processor.Terminate(BsvPeerSessionTerminationCause.ExternalFailure);
+            TerminateSession(BsvPeerSessionTerminationCause.ExternalFailure);
             throw;
         }
         finally
@@ -315,12 +435,12 @@ public sealed class BsvPeerSessionIngressAdapter :
         if (status == OperationStatus.InvalidData)
         {
             _isIngressUnusable = true;
-            _processor.Terminate(BsvPeerSessionTerminationCause.Disconnected);
+            TerminateSession(BsvPeerSessionTerminationCause.Disconnected);
             return status;
         }
 
         _isCompleted = true;
-        _processor.Terminate(BsvPeerSessionTerminationCause.Disconnected);
+        TerminateSession(BsvPeerSessionTerminationCause.Disconnected);
         return OperationStatus.Done;
     }
 
@@ -338,7 +458,7 @@ public sealed class BsvPeerSessionIngressAdapter :
             throw new InvalidOperationException("Peer session cannot be disposed from an ingress callback.");
         }
 
-        _processor.Terminate(BsvPeerSessionTerminationCause.Disconnected);
+        TerminateSession(BsvPeerSessionTerminationCause.Disconnected);
         _processor.Dispose();
         _ingress.Dispose();
         _isDisposed = true;
@@ -359,10 +479,87 @@ public sealed class BsvPeerSessionIngressAdapter :
     void IMessageIngressSink.OnMessageCompleted(in MessageIngressResult result) =>
         ((IMessageIngressSink)_processor).OnMessageCompleted(result);
 
+    OperationStatus IBsvPeerSessionEgressCompletionOwner.ApplyEgressCompletion(
+        in BsvPeerSessionEgressCompletion completion)
+    {
+        if (_isCompleted ||
+            _isIngressUnusable ||
+            _isDisposed ||
+            _isEgressDisposed ||
+            completion.PlanId == 0 ||
+            !_egress.IsApplyingCompletion(completion))
+        {
+            return OperationStatus.InvalidData;
+        }
+
+        if (completion.RelayWriteCommitKind == BsvPeerSessionRelayWriteCommitKind.None)
+        {
+            return IsValidHandshakeCompletion(completion)
+                ? OperationStatus.Done
+                : OperationStatus.InvalidData;
+        }
+
+        if (!CanApplyReadyTransition())
+        {
+            return OperationStatus.InvalidData;
+        }
+
+        if (HasPendingOutputs)
+        {
+            return OperationStatus.DestinationTooSmall;
+        }
+
+        if (!_processor.CanApplyEgressCompletion(completion))
+        {
+            return OperationStatus.InvalidData;
+        }
+
+        return _processor.ApplyEgressCompletion(completion);
+    }
+
     private bool CanApplyReadyTransition() =>
         !_isCompleted &&
         !_isIngressUnusable &&
         HandshakeState == BsvHandshakeState.Ready;
+
+    private bool CanPlanEgress(bool requireReady, out OperationStatus blockedStatus)
+    {
+        blockedStatus = OperationStatus.InvalidData;
+        if (!CanUseEgress() || (requireReady && !CanApplyReadyTransition()))
+        {
+            return false;
+        }
+
+        if (HasPendingOutputs)
+        {
+            blockedStatus = OperationStatus.DestinationTooSmall;
+            return false;
+        }
+
+        return true;
+    }
+
+    private bool CanUseEgress() =>
+        !_isCompleted && !_isIngressUnusable && !_isEgressDisposed;
+
+    private static bool IsValidHandshakeCompletion(
+        in BsvPeerSessionEgressCompletion completion) =>
+        completion.TransactionId == default &&
+        completion.SendKind is BsvPeerSessionSendKind.Version or
+            BsvPeerSessionSendKind.Verack or
+            BsvPeerSessionSendKind.Protoconf or
+            BsvPeerSessionSendKind.Pong or
+            BsvPeerSessionSendKind.Ping;
+
+    private void TerminateSession(BsvPeerSessionTerminationCause cause)
+    {
+        _processor.Terminate(cause);
+        if (!_isEgressDisposed)
+        {
+            _egress.Dispose();
+            _isEgressDisposed = true;
+        }
+    }
 
     private void ThrowIfUnavailable()
     {

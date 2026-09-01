@@ -45,12 +45,66 @@ internal enum BsvPeerSessionEgressState
     Disposed,
 }
 
-internal readonly record struct BsvPeerSessionEgressCompletion(
-    ulong PlanId,
-    BsvPeerSessionSendKind SendKind,
-    BsvPeerSessionRelayWriteCommitKind RelayWriteCommitKind,
-    Hash256 TransactionId,
-    ulong Value);
+internal readonly struct BsvPeerSessionEgressCompletion : IEquatable<BsvPeerSessionEgressCompletion>
+{
+    private readonly BsvPeerSessionEgressPlanner? _authority;
+
+    internal BsvPeerSessionEgressCompletion(
+        BsvPeerSessionEgressPlanner authority,
+        ulong planId,
+        BsvPeerSessionSendKind sendKind,
+        BsvPeerSessionRelayWriteCommitKind relayWriteCommitKind,
+        Hash256 transactionId,
+        ulong value)
+    {
+        _authority = authority;
+        PlanId = planId;
+        SendKind = sendKind;
+        RelayWriteCommitKind = relayWriteCommitKind;
+        TransactionId = transactionId;
+        Value = value;
+    }
+
+    internal ulong PlanId { get; }
+
+    internal BsvPeerSessionSendKind SendKind { get; }
+
+    internal BsvPeerSessionRelayWriteCommitKind RelayWriteCommitKind { get; }
+
+    internal Hash256 TransactionId { get; }
+
+    internal ulong Value { get; }
+
+    internal bool IsOwnedBy(BsvPeerSessionEgressPlanner authority) =>
+        ReferenceEquals(_authority, authority);
+
+    public bool Equals(BsvPeerSessionEgressCompletion other) =>
+        ReferenceEquals(_authority, other._authority) &&
+        PlanId == other.PlanId &&
+        SendKind == other.SendKind &&
+        RelayWriteCommitKind == other.RelayWriteCommitKind &&
+        TransactionId == other.TransactionId &&
+        Value == other.Value;
+
+    public override bool Equals(object? obj) =>
+        obj is BsvPeerSessionEgressCompletion other && Equals(other);
+
+    public override int GetHashCode() =>
+        HashCode.Combine(_authority, PlanId, SendKind, RelayWriteCommitKind, TransactionId, Value);
+
+    public static bool operator ==(
+        BsvPeerSessionEgressCompletion left,
+        BsvPeerSessionEgressCompletion right) => left.Equals(right);
+
+    public static bool operator !=(
+        BsvPeerSessionEgressCompletion left,
+        BsvPeerSessionEgressCompletion right) => !left.Equals(right);
+}
+
+internal interface IBsvPeerSessionEgressCompletionOwner
+{
+    OperationStatus ApplyEgressCompletion(in BsvPeerSessionEgressCompletion completion);
+}
 
 /// <summary>
 /// Maps one peer-session send intent at a time to exact leased frame segments. Transaction chunks
@@ -61,6 +115,7 @@ internal sealed class BsvPeerSessionEgressPlanner : IDisposable
     internal const int MaximumFixedPayloadLength = 658;
 
     private readonly MessageFrameWriteAuthority _writer = new();
+    private readonly IBsvPeerSessionEgressCompletionOwner _completionOwner;
     private readonly byte[] _networkMagic = new byte[MessageHeaderCodec.NetworkMagicLength];
     private readonly byte[] _fixedPayload = new byte[MaximumFixedPayloadLength];
 
@@ -72,11 +127,13 @@ internal sealed class BsvPeerSessionEgressPlanner : IDisposable
     private ulong _value;
     private int _fixedPayloadLength;
     private BsvPeerSessionEgressCompletion _completion;
-    private bool _completionConsumed;
+    private bool _isApplyingOwner;
     private ulong _nextPlanId = 1;
     private ulong _planId;
 
-    internal BsvPeerSessionEgressPlanner(ReadOnlySpan<byte> networkMagic)
+    internal BsvPeerSessionEgressPlanner(
+        ReadOnlySpan<byte> networkMagic,
+        IBsvPeerSessionEgressCompletionOwner completionOwner)
     {
         if (networkMagic.Length != MessageHeaderCodec.NetworkMagicLength)
         {
@@ -84,24 +141,68 @@ internal sealed class BsvPeerSessionEgressPlanner : IDisposable
         }
 
         networkMagic.CopyTo(_networkMagic);
+        _completionOwner = completionOwner ?? throw new ArgumentNullException(nameof(completionOwner));
     }
 
     internal BsvPeerSessionEgressState State => _state;
 
     internal MessageFrameWriteSegment PendingSegment => _writer.PendingSegment;
 
-    internal bool TryConsumeCompletion(out BsvPeerSessionEgressCompletion completion)
+    internal bool TryPeekCompletion(out BsvPeerSessionEgressCompletion completion)
     {
-        if (_state != BsvPeerSessionEgressState.Complete || _completionConsumed)
+        if (_state != BsvPeerSessionEgressState.Complete)
         {
             completion = default;
             return false;
         }
 
         completion = _completion;
-        _completion = default;
-        _completionConsumed = true;
         return true;
+    }
+
+    internal bool IsApplyingCompletion(in BsvPeerSessionEgressCompletion completion) =>
+        _isApplyingOwner &&
+        _state == BsvPeerSessionEgressState.Complete &&
+        completion.IsOwnedBy(this) &&
+        _completion == completion;
+
+    internal OperationStatus CommitCompletion()
+    {
+        ObjectDisposedException.ThrowIf(_state == BsvPeerSessionEgressState.Disposed, this);
+        if (_state != BsvPeerSessionEgressState.Complete)
+        {
+            return Fault();
+        }
+
+        OperationStatus status;
+        try
+        {
+            _isApplyingOwner = true;
+            status = _completionOwner.ApplyEgressCompletion(_completion);
+        }
+        catch
+        {
+            _ = Fault();
+            throw;
+        }
+        finally
+        {
+            _isApplyingOwner = false;
+        }
+
+        if (status == OperationStatus.DestinationTooSmall)
+        {
+            return status;
+        }
+
+        if (status != OperationStatus.Done || _writer.Reset() != OperationStatus.Done)
+        {
+            return Fault();
+        }
+
+        ClearSend();
+        _state = BsvPeerSessionEgressState.Idle;
+        return OperationStatus.Done;
     }
 
     internal OperationStatus PlanHandshake(
@@ -401,21 +502,6 @@ internal sealed class BsvPeerSessionEgressPlanner : IDisposable
         return Fault();
     }
 
-    internal OperationStatus Reset()
-    {
-        ObjectDisposedException.ThrowIf(_state == BsvPeerSessionEgressState.Disposed, this);
-        if (_state != BsvPeerSessionEgressState.Complete ||
-            !_completionConsumed ||
-            _writer.Reset() != OperationStatus.Done)
-        {
-            return Fault();
-        }
-
-        ClearSend();
-        _state = BsvPeerSessionEgressState.Idle;
-        return OperationStatus.Done;
-    }
-
     internal OperationStatus Abort()
     {
         ObjectDisposedException.ThrowIf(_state == BsvPeerSessionEgressState.Disposed, this);
@@ -529,12 +615,12 @@ internal sealed class BsvPeerSessionEgressPlanner : IDisposable
         _transactionHash?.Dispose();
         _transactionHash = null;
         _completion = new BsvPeerSessionEgressCompletion(
+            this,
             _planId,
             _sendKind,
             _relayWriteCommitKind,
             _transactionId,
             _value);
-        _completionConsumed = false;
         _state = BsvPeerSessionEgressState.Complete;
         return OperationStatus.Done;
     }
@@ -588,6 +674,6 @@ internal sealed class BsvPeerSessionEgressPlanner : IDisposable
         _value = 0;
         _planId = 0;
         _completion = default;
-        _completionConsumed = false;
+        _isApplyingOwner = false;
     }
 }

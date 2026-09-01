@@ -40,7 +40,7 @@ public sealed class BsvPeerSessionIngressAdapterTests
         DrainBroadcast(session, outputs, BsvTransactionBroadcastOutputKind.SendInventory, transactionId);
         Assert.IsFalse(session.IsAnnounced);
 
-        Assert.AreEqual(OperationStatus.Done, session.ApplyInventoryWriteCommitted(transactionId));
+        Assert.AreEqual(OperationStatus.Done, CommitInventoryEgress(session, transactionId));
         DrainBroadcast(session, outputs, BsvTransactionBroadcastOutputKind.Announced, transactionId);
         Assert.IsTrue(session.IsAnnounced);
 
@@ -52,7 +52,9 @@ public sealed class BsvPeerSessionIngressAdapterTests
         Assert.IsTrue(session.WasRequestedByPeer);
         Assert.IsFalse(session.IsSentToPeer);
 
-        Assert.AreEqual(OperationStatus.Done, session.ApplyTransactionWriteCommitted(transactionId));
+        Assert.AreEqual(
+            OperationStatus.Done,
+            CommitTransactionEgress(session, transaction, transactionId));
         DrainBroadcast(session, outputs, BsvTransactionBroadcastOutputKind.SentToPeer, transactionId);
         Assert.IsTrue(session.IsSentToPeer);
 
@@ -99,7 +101,7 @@ public sealed class BsvPeerSessionIngressAdapterTests
         DrainFetch(session, outputs, BsvTransactionFetchOutputKind.SendGetData, transactionId);
         Assert.AreEqual(BsvTransactionFetchState.GetDataWritePending, session.FetchState);
 
-        Assert.AreEqual(OperationStatus.Done, session.ApplyGetDataWriteCommitted(transactionId));
+        Assert.AreEqual(OperationStatus.Done, CommitGetDataEgress(session, transactionId));
         DrainFetch(session, outputs, BsvTransactionFetchOutputKind.Requested, transactionId);
         Assert.AreEqual(BsvTransactionFetchState.Requested, session.FetchState);
 
@@ -133,10 +135,7 @@ public sealed class BsvPeerSessionIngressAdapterTests
         ConsumeFrame(session, EncodeInventory("notfound"u8, transactionId), bytewise: false);
         Assert.AreEqual(0, session.PendingFetchOutputCount);
         Assert.AreEqual(BsvTransactionFetchState.GetDataWritePending, session.FetchState);
-        Assert.AreEqual(OperationStatus.InvalidData, session.ApplyGetDataWriteCommitted(otherId));
-        Assert.AreEqual(BsvTransactionFetchState.GetDataWritePending, session.FetchState);
-
-        Assert.AreEqual(OperationStatus.Done, session.ApplyGetDataWriteCommitted(transactionId));
+        Assert.AreEqual(OperationStatus.Done, CommitGetDataEgress(session, transactionId));
         Assert.AreEqual(
             OperationStatus.DestinationTooSmall,
             session.DrainFetchOutputs(outputs[..1], out var shortWritten));
@@ -147,7 +146,7 @@ public sealed class BsvPeerSessionIngressAdapterTests
         Assert.AreEqual(BsvTransactionFetchOutputKind.Requested, outputs[0].Kind);
         Assert.AreEqual(BsvTransactionFetchOutputKind.NotFound, outputs[1].Kind);
         Assert.AreEqual(BsvTransactionFetchState.NotFound, session.FetchState);
-        Assert.AreEqual(OperationStatus.Done, session.ApplyGetDataWriteCommitted(transactionId));
+        Assert.AreEqual(OperationStatus.InvalidData, session.CommitEgressCompletion());
         Assert.AreEqual(0, session.PendingFetchOutputCount);
     }
 
@@ -187,7 +186,7 @@ public sealed class BsvPeerSessionIngressAdapterTests
             broadcastOutputs,
             BsvTransactionBroadcastOutputKind.SendInventory,
             transactionId);
-        Assert.AreEqual(OperationStatus.Done, session.ApplyInventoryWriteCommitted(transactionId));
+        Assert.AreEqual(OperationStatus.Done, CommitInventoryEgress(session, transactionId));
         DrainBroadcast(
             session,
             broadcastOutputs,
@@ -221,7 +220,7 @@ public sealed class BsvPeerSessionIngressAdapterTests
             stackalloc BsvTransactionBroadcastOutput[BsvTransactionBroadcastStateMachine.MaximumOutputCount];
         Assert.AreEqual(OperationStatus.Done, session.StartBroadcast(transactionId));
         Assert.AreEqual(OperationStatus.Done, session.DrainBroadcastOutputs(outputs, out _));
-        Assert.AreEqual(OperationStatus.Done, session.ApplyInventoryWriteCommitted(transactionId));
+        Assert.AreEqual(OperationStatus.Done, CommitInventoryEgress(session, transactionId));
         Assert.AreEqual(OperationStatus.Done, session.DrainBroadcastOutputs(outputs, out _));
         Assert.AreEqual(OperationStatus.Done, session.StartFetch(transactionId));
         var frame = EncodeInventory("inv"u8, transactionId);
@@ -279,7 +278,7 @@ public sealed class BsvPeerSessionIngressAdapterTests
             stackalloc BsvTransactionBroadcastOutput[BsvTransactionBroadcastStateMachine.MaximumOutputCount];
         Assert.AreEqual(OperationStatus.Done, session.StartBroadcast(transactionId));
         Assert.AreEqual(OperationStatus.Done, session.DrainBroadcastOutputs(outputs, out _));
-        Assert.AreEqual(OperationStatus.Done, session.ApplyInventoryWriteCommitted(transactionId));
+        Assert.AreEqual(OperationStatus.Done, CommitInventoryEgress(session, transactionId));
         Assert.AreEqual(OperationStatus.Done, session.DrainBroadcastOutputs(outputs, out _));
         Assert.AreEqual(OperationStatus.Done, session.StartFetch(transactionId));
 
@@ -341,6 +340,215 @@ public sealed class BsvPeerSessionIngressAdapterTests
     }
 
     [TestMethod]
+    public void EarlyReceivedTransactionSupersedesCompletedGetDataWriteWithoutRequestedFact()
+    {
+        var sink = new RecordingTransactionSink();
+        using var session = CreateReadySession(sink, bytewise: false);
+        var transaction = CreateMinimalTransaction();
+        var transactionId = Hash256.DoubleSha256(transaction);
+        Span<BsvTransactionFetchOutput> outputs =
+            stackalloc BsvTransactionFetchOutput[BsvTransactionFetchStateMachine.MaximumOutputCount];
+        Assert.AreEqual(OperationStatus.Done, session.StartFetch(transactionId));
+        ConsumeFrame(session, EncodeInventory("inv"u8, transactionId), bytewise: false);
+        DrainFetch(session, outputs, BsvTransactionFetchOutputKind.SendGetData, transactionId);
+        Assert.AreEqual(
+            OperationStatus.Done,
+            session.PlanFetchEgress(
+                new BsvTransactionFetchOutput(BsvTransactionFetchOutputKind.SendGetData, transactionId),
+                out _));
+        DrainEgress(session);
+
+        ConsumeFrame(session, EncodeBasic("tx"u8, transaction), bytewise: false);
+        DrainFetch(session, outputs, BsvTransactionFetchOutputKind.Received, transactionId);
+        Assert.AreEqual(OperationStatus.Done, session.CommitEgressCompletion());
+        Assert.AreEqual(BsvTransactionFetchState.Received, session.FetchState);
+        Assert.AreEqual(0, session.PendingFetchOutputCount);
+    }
+
+    [TestMethod]
+    public void HandshakeEgressCompletionResetsWithoutEnteringRelay()
+    {
+        using var session = new BsvPeerSessionIngressAdapter(
+            NetworkMagic,
+            MaximumPayloadLength,
+            MinimumProtocolVersion,
+            new RecordingTransactionSink());
+        Assert.AreEqual(OperationStatus.Done, session.StartHandshake(LocalNonce));
+        Span<BsvHandshakeOutput> outputs = stackalloc BsvHandshakeOutput[1];
+        Assert.AreEqual(OperationStatus.Done, session.DrainHandshakeOutputs(outputs, out var written));
+        Assert.AreEqual(1, written);
+        Assert.AreEqual(BsvHandshakeOutputKind.SendVersion, outputs[0].Kind);
+        var encodedVersion = CreateVersionPayload(LocalNonce);
+        Assert.AreEqual(
+            OperationStatus.Done,
+            VersionPayloadCodec.TryParse(encodedVersion, out var version, out var consumed));
+        Assert.AreEqual(encodedVersion.Length, consumed);
+
+        Assert.AreEqual(OperationStatus.Done, session.PlanVersionEgress(outputs[0], version));
+        DrainEgress(session);
+        Assert.AreEqual(OperationStatus.Done, session.CommitEgressCompletion());
+        Assert.AreEqual(BsvPeerSessionEgressState.Idle, session.EgressState);
+        Assert.AreEqual(BsvTransactionBroadcastState.Created, session.BroadcastState);
+        Assert.AreEqual(BsvTransactionFetchState.Created, session.FetchState);
+        Assert.AreEqual(0, session.PendingBroadcastOutputCount);
+        Assert.AreEqual(0, session.PendingFetchOutputCount);
+    }
+
+    [TestMethod]
+    public void CompletionCapabilityRejectsForgedAndCrossSessionSameValue()
+    {
+        var transactionId = Hash256.DoubleSha256(CreateMinimalTransaction());
+        using var first = CreateReadySession(new RecordingTransactionSink(), bytewise: false);
+        using var second = CreateReadySession(new RecordingTransactionSink(), bytewise: false);
+        PrepareInventoryCompletion(first, transactionId);
+        PrepareInventoryCompletion(second, transactionId);
+        var firstPlanner = GetEgressPlanner(first);
+        var secondPlanner = GetEgressPlanner(second);
+        Assert.IsTrue(firstPlanner.TryPeekCompletion(out var firstCompletion));
+        Assert.IsTrue(secondPlanner.TryPeekCompletion(out var secondCompletion));
+        Assert.AreEqual(firstCompletion.PlanId, secondCompletion.PlanId);
+        var firstOwner = (IBsvPeerSessionEgressCompletionOwner)first;
+        var secondOwner = (IBsvPeerSessionEgressCompletionOwner)second;
+
+        Assert.AreEqual(OperationStatus.InvalidData, firstOwner.ApplyEgressCompletion(firstCompletion));
+        Assert.IsFalse(first.IsAnnounced);
+        Assert.AreEqual(OperationStatus.InvalidData, secondOwner.ApplyEgressCompletion(firstCompletion));
+        var forged = new BsvPeerSessionEgressCompletion(
+            secondPlanner,
+            secondCompletion.PlanId + 1,
+            secondCompletion.SendKind,
+            secondCompletion.RelayWriteCommitKind,
+            secondCompletion.TransactionId,
+            secondCompletion.Value);
+        Assert.AreEqual(OperationStatus.InvalidData, secondOwner.ApplyEgressCompletion(forged));
+        Assert.IsFalse(second.IsAnnounced);
+        Assert.AreEqual(OperationStatus.Done, second.CommitEgressCompletion());
+        Assert.IsTrue(second.IsAnnounced);
+        Assert.IsFalse(first.IsAnnounced);
+        Assert.AreEqual(OperationStatus.Done, first.CommitEgressCompletion());
+        Assert.IsTrue(first.IsAnnounced);
+    }
+
+    [TestMethod]
+    public void RelayIntentMustMatchCurrentPhaseBeforeAnyWireBytesExist()
+    {
+        using var session = CreateReadySession(new RecordingTransactionSink(), bytewise: false);
+        var transactionId = Hash256.DoubleSha256(CreateMinimalTransaction());
+        var otherId = Hash256.DoubleSha256([0x42]);
+        var sendInventory = new BsvTransactionBroadcastOutput(
+            BsvTransactionBroadcastOutputKind.SendInventory,
+            transactionId);
+        Assert.AreEqual(OperationStatus.InvalidData, session.PlanBroadcastEgress(sendInventory, out _));
+        Assert.IsTrue(session.PendingEgressSegment.IsEmpty);
+
+        Assert.AreEqual(OperationStatus.Done, session.StartBroadcast(transactionId));
+        Span<BsvTransactionBroadcastOutput> outputs =
+            stackalloc BsvTransactionBroadcastOutput[BsvTransactionBroadcastStateMachine.MaximumOutputCount];
+        DrainBroadcast(session, outputs, BsvTransactionBroadcastOutputKind.SendInventory, transactionId);
+        Assert.AreEqual(
+            OperationStatus.InvalidData,
+            session.PlanBroadcastEgress(
+                new BsvTransactionBroadcastOutput(
+                    BsvTransactionBroadcastOutputKind.SendInventory,
+                    otherId),
+                out _));
+        Assert.IsTrue(session.PendingEgressSegment.IsEmpty);
+        Assert.AreEqual(OperationStatus.Done, session.PlanBroadcastEgress(sendInventory, out _));
+    }
+
+    [TestMethod]
+    public void PendingOutputPreservesCompletedEgressForRetry()
+    {
+        using var session = CreateReadySession(new RecordingTransactionSink(), bytewise: false);
+        var transactionId = Hash256.DoubleSha256(CreateMinimalTransaction());
+        PrepareInventoryCompletion(session, transactionId);
+        ConsumeFrame(session, EncodeInventory("inv"u8, transactionId), bytewise: false);
+
+        Assert.AreEqual(OperationStatus.DestinationTooSmall, session.CommitEgressCompletion());
+        Assert.AreEqual(BsvPeerSessionEgressState.Complete, session.EgressState);
+        Assert.IsFalse(session.IsAnnounced);
+        Span<BsvTransactionBroadcastOutput> outputs =
+            stackalloc BsvTransactionBroadcastOutput[BsvTransactionBroadcastStateMachine.MaximumOutputCount];
+        DrainBroadcast(
+            session,
+            outputs,
+            BsvTransactionBroadcastOutputKind.ObservedFromPeer,
+            transactionId);
+        Assert.AreEqual(OperationStatus.Done, session.CommitEgressCompletion());
+        DrainBroadcast(session, outputs, BsvTransactionBroadcastOutputKind.Announced, transactionId);
+        Assert.IsTrue(session.IsAnnounced);
+    }
+
+    [TestMethod]
+    public void TerminalEgressOperationsReturnStableInvalidData()
+    {
+        using var completed = CreateReadySession(new RecordingTransactionSink(), bytewise: false);
+        Assert.AreEqual(OperationStatus.Done, completed.CompleteEndOfInput());
+        Assert.AreEqual(
+            OperationStatus.InvalidData,
+            completed.ProvideTransactionEgressChunk(new byte[] { 1 }));
+        Assert.AreEqual(OperationStatus.InvalidData, completed.AcknowledgeEgress(default, 1));
+        Assert.AreEqual(OperationStatus.InvalidData, completed.EndTransactionEgressPayload());
+        Assert.AreEqual(OperationStatus.InvalidData, completed.CommitEgressCompletion());
+        Assert.AreEqual(OperationStatus.InvalidData, completed.AbortEgress());
+        Assert.AreEqual(
+            OperationStatus.InvalidData,
+            completed.PlanBroadcastEgress(
+                new BsvTransactionBroadcastOutput(
+                    BsvTransactionBroadcastOutputKind.SendInventory,
+                    default),
+                out _));
+
+        using var failed = CreateReadySession(new RecordingTransactionSink(), bytewise: false);
+        var bad = EncodeInventory("inv"u8, default);
+        bad[^1] ^= 0xff;
+        Assert.AreEqual(OperationStatus.InvalidData, failed.Consume(bad, out _));
+        Assert.AreEqual(
+            OperationStatus.InvalidData,
+            failed.ProvideTransactionEgressChunk(new byte[] { 1 }));
+        Assert.AreEqual(OperationStatus.InvalidData, failed.AcknowledgeEgress(default, 1));
+        Assert.AreEqual(OperationStatus.InvalidData, failed.EndTransactionEgressPayload());
+        Assert.AreEqual(OperationStatus.InvalidData, failed.CommitEgressCompletion());
+        Assert.AreEqual(OperationStatus.InvalidData, failed.AbortEgress());
+    }
+
+    [TestMethod]
+    public void AdapterOwnsDefaultPeerOutboundMaximum()
+    {
+        using var session = CreateReadySession(new RecordingTransactionSink(), bytewise: false);
+        var transactionId = Hash256.DoubleSha256(CreateMinimalTransaction());
+        PrepareTransactionIntent(session, transactionId);
+
+        Assert.AreEqual(
+            OperationStatus.InvalidData,
+            session.PlanTransactionEgress(
+                new BsvTransactionBroadcastOutput(
+                    BsvTransactionBroadcastOutputKind.SendTransaction,
+                    transactionId),
+                BsvHandshakeStateMachine.DefaultPeerMaximumReceivePayloadLength + 1UL,
+                transactionId));
+        Assert.IsTrue(session.PendingEgressSegment.IsEmpty);
+
+        const uint negotiatedMaximum =
+            BsvHandshakeStateMachine.DefaultPeerMaximumReceivePayloadLength * 2;
+        using var negotiated = CreateReadySession(
+            new RecordingTransactionSink(),
+            bytewise: false,
+            peerMaximumReceivePayloadLength: negotiatedMaximum);
+        PrepareTransactionIntent(negotiated, transactionId);
+        Assert.AreEqual(
+            OperationStatus.Done,
+            negotiated.PlanTransactionEgress(
+                new BsvTransactionBroadcastOutput(
+                    BsvTransactionBroadcastOutputKind.SendTransaction,
+                    transactionId),
+                BsvHandshakeStateMachine.DefaultPeerMaximumReceivePayloadLength + 1UL,
+                transactionId));
+        Assert.IsFalse(negotiated.PendingEgressSegment.IsEmpty);
+        Assert.AreEqual(OperationStatus.Done, negotiated.AbortEgress());
+    }
+
+    [TestMethod]
     public void OversizedUnknownCommandIsRejectedAfterHeaderWithoutConsumingPayload()
     {
         var sink = new RecordingTransactionSink();
@@ -360,20 +568,22 @@ public sealed class BsvPeerSessionIngressAdapterTests
 
     private static BsvPeerSessionIngressAdapter CreateReadySession(
         RecordingTransactionSink sink,
-        bool bytewise)
+        bool bytewise,
+        uint? peerMaximumReceivePayloadLength = null)
     {
         var session = new BsvPeerSessionIngressAdapter(
             NetworkMagic,
             MaximumPayloadLength,
             MinimumProtocolVersion,
             sink);
-        CompleteHandshake(session, bytewise);
+        CompleteHandshake(session, bytewise, peerMaximumReceivePayloadLength);
         return session;
     }
 
     private static void CompleteHandshake(
         BsvPeerSessionIngressAdapter session,
-        bool bytewise)
+        bool bytewise,
+        uint? peerMaximumReceivePayloadLength = null)
     {
         Assert.AreEqual(OperationStatus.Done, session.StartHandshake(LocalNonce));
         Span<BsvHandshakeOutput> outputs = stackalloc BsvHandshakeOutput[3];
@@ -392,6 +602,26 @@ public sealed class BsvPeerSessionIngressAdapterTests
         Assert.AreEqual(1, written);
         Assert.AreEqual(BsvHandshakeOutputKind.BecameReady, outputs[0].Kind);
         Assert.AreEqual(BsvHandshakeState.Ready, session.HandshakeState);
+
+        if (peerMaximumReceivePayloadLength.HasValue)
+        {
+            Span<byte> protoconf = stackalloc byte[8];
+            Assert.AreEqual(
+                OperationStatus.Done,
+                ProtoconfPayloadCodec.TryWrite(
+                    protoconf,
+                    peerMaximumReceivePayloadLength.Value,
+                    default,
+                    includeStreamPolicies: false,
+                    out var protoconfLength));
+            ConsumeFrame(
+                session,
+                EncodeBasic("protoconf"u8, protoconf[..protoconfLength]),
+                bytewise);
+            Assert.AreEqual(
+                peerMaximumReceivePayloadLength.Value,
+                session.EffectivePeerMaximumReceivePayloadLength);
+        }
     }
 
     private static void ConsumeFrame(
@@ -414,6 +644,123 @@ public sealed class BsvPeerSessionIngressAdapterTests
                 index == frame.Length - 1 ? OperationStatus.Done : OperationStatus.NeedMoreData,
                 status,
                 $"byte {index}");
+        }
+    }
+
+    private static OperationStatus CommitInventoryEgress(
+        BsvPeerSessionIngressAdapter session,
+        Hash256 transactionId)
+    {
+        var status = session.PlanBroadcastEgress(
+            new BsvTransactionBroadcastOutput(
+                BsvTransactionBroadcastOutputKind.SendInventory,
+                transactionId),
+            out var disposition);
+        Assert.AreEqual(BsvPeerSessionOutputDisposition.Send, disposition);
+        if (status != OperationStatus.Done)
+        {
+            return status;
+        }
+
+        DrainEgress(session);
+        return session.CommitEgressCompletion();
+    }
+
+    private static void PrepareInventoryCompletion(
+        BsvPeerSessionIngressAdapter session,
+        Hash256 transactionId)
+    {
+        Assert.AreEqual(OperationStatus.Done, session.StartBroadcast(transactionId));
+        Span<BsvTransactionBroadcastOutput> outputs =
+            stackalloc BsvTransactionBroadcastOutput[BsvTransactionBroadcastStateMachine.MaximumOutputCount];
+        DrainBroadcast(session, outputs, BsvTransactionBroadcastOutputKind.SendInventory, transactionId);
+        Assert.AreEqual(
+            OperationStatus.Done,
+            session.PlanBroadcastEgress(
+                new BsvTransactionBroadcastOutput(
+                    BsvTransactionBroadcastOutputKind.SendInventory,
+                    transactionId),
+                out _));
+        DrainEgress(session);
+        Assert.AreEqual(BsvPeerSessionEgressState.Complete, session.EgressState);
+    }
+
+    private static void PrepareTransactionIntent(
+        BsvPeerSessionIngressAdapter session,
+        Hash256 transactionId)
+    {
+        Assert.AreEqual(OperationStatus.Done, session.StartBroadcast(transactionId));
+        Span<BsvTransactionBroadcastOutput> outputs =
+            stackalloc BsvTransactionBroadcastOutput[BsvTransactionBroadcastStateMachine.MaximumOutputCount];
+        DrainBroadcast(session, outputs, BsvTransactionBroadcastOutputKind.SendInventory, transactionId);
+        Assert.AreEqual(OperationStatus.Done, CommitInventoryEgress(session, transactionId));
+        DrainBroadcast(session, outputs, BsvTransactionBroadcastOutputKind.Announced, transactionId);
+        ConsumeFrame(session, EncodeInventory("getdata"u8, transactionId), bytewise: false);
+        Assert.AreEqual(OperationStatus.Done, session.DrainBroadcastOutputs(outputs, out var written));
+        Assert.AreEqual(2, written);
+        Assert.AreEqual(BsvTransactionBroadcastOutputKind.RequestedByPeer, outputs[0].Kind);
+        Assert.AreEqual(BsvTransactionBroadcastOutputKind.SendTransaction, outputs[1].Kind);
+    }
+
+    private static BsvPeerSessionEgressPlanner GetEgressPlanner(
+        BsvPeerSessionIngressAdapter session)
+    {
+        var field = typeof(BsvPeerSessionIngressAdapter).GetField(
+            "_egress",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+        Assert.IsNotNull(field);
+        return (BsvPeerSessionEgressPlanner)field.GetValue(session)!;
+    }
+
+    private static OperationStatus CommitTransactionEgress(
+        BsvPeerSessionIngressAdapter session,
+        ReadOnlyMemory<byte> transaction,
+        Hash256 transactionId)
+    {
+        var status = session.PlanTransactionEgress(
+            new BsvTransactionBroadcastOutput(
+                BsvTransactionBroadcastOutputKind.SendTransaction,
+                transactionId),
+            (ulong)transaction.Length,
+            transactionId);
+        if (status != OperationStatus.Done)
+        {
+            return status;
+        }
+
+        Assert.AreEqual(
+            OperationStatus.Done,
+            session.AcknowledgeEgress(session.PendingEgressSegment, session.PendingEgressSegment.Length));
+        Assert.AreEqual(OperationStatus.Done, session.ProvideTransactionEgressChunk(transaction));
+        Assert.AreEqual(
+            OperationStatus.Done,
+            session.AcknowledgeEgress(session.PendingEgressSegment, session.PendingEgressSegment.Length));
+        return session.CommitEgressCompletion();
+    }
+
+    private static OperationStatus CommitGetDataEgress(
+        BsvPeerSessionIngressAdapter session,
+        Hash256 transactionId)
+    {
+        var status = session.PlanFetchEgress(
+            new BsvTransactionFetchOutput(BsvTransactionFetchOutputKind.SendGetData, transactionId),
+            out var disposition);
+        Assert.AreEqual(BsvPeerSessionOutputDisposition.Send, disposition);
+        if (status != OperationStatus.Done)
+        {
+            return status;
+        }
+
+        DrainEgress(session);
+        return session.CommitEgressCompletion();
+    }
+
+    private static void DrainEgress(BsvPeerSessionIngressAdapter session)
+    {
+        while (!session.PendingEgressSegment.IsEmpty)
+        {
+            var pending = session.PendingEgressSegment;
+            Assert.AreEqual(OperationStatus.Done, session.AcknowledgeEgress(pending, pending.Length));
         }
     }
 

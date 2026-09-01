@@ -116,14 +116,17 @@ internal sealed class BsvPeerSessionFrameProcessor :
     internal OperationStatus StartFetch(in Hash256 transactionId) =>
         _relay.StartFetch(transactionId);
 
-    internal OperationStatus ApplyInventoryWriteCommitted(in Hash256 transactionId) =>
-        _relay.ApplyInventoryWriteCommitted(transactionId);
+    internal bool CanPlanBroadcastEgress(in BsvTransactionBroadcastOutput output) =>
+        _relay.CanPlanBroadcastEgress(output);
 
-    internal OperationStatus ApplyTransactionWriteCommitted(in Hash256 transactionId) =>
-        _relay.ApplyTransactionWriteCommitted(transactionId);
+    internal bool CanPlanFetchEgress(in BsvTransactionFetchOutput output) =>
+        _relay.CanPlanFetchEgress(output);
 
-    internal OperationStatus ApplyGetDataWriteCommitted(in Hash256 transactionId) =>
-        _relay.ApplyGetDataWriteCommitted(transactionId);
+    internal bool CanApplyEgressCompletion(in BsvPeerSessionEgressCompletion completion) =>
+        _relay.CanApplyEgressCompletion(completion);
+
+    internal OperationStatus ApplyEgressCompletion(in BsvPeerSessionEgressCompletion completion) =>
+        _relay.ApplyEgressCompletion(completion);
 
     internal OperationStatus DrainHandshakeOutputs(
         Span<BsvHandshakeOutput> destination,

@@ -66,14 +66,54 @@ internal sealed class BsvPeerRelayCoordinator : IDisposable
 
     internal OperationStatus StartFetch(in Hash256 transactionId) => _fetch.Start(transactionId);
 
-    internal OperationStatus ApplyInventoryWriteCommitted(in Hash256 transactionId) =>
-        ApplyBroadcast(BsvTransactionBroadcastInput.InventoryWriteCommitted(transactionId));
+    internal bool CanPlanBroadcastEgress(in BsvTransactionBroadcastOutput output) =>
+        output.TransactionId == TargetTransactionId &&
+        output.Kind switch
+        {
+            BsvTransactionBroadcastOutputKind.SendInventory =>
+                BroadcastState == BsvTransactionBroadcastState.InventoryWritePending,
+            BsvTransactionBroadcastOutputKind.SendTransaction =>
+                BroadcastState == BsvTransactionBroadcastState.TransactionWritePending,
+            _ => true,
+        };
 
-    internal OperationStatus ApplyTransactionWriteCommitted(in Hash256 transactionId) =>
-        ApplyBroadcast(BsvTransactionBroadcastInput.TransactionWriteCommitted(transactionId));
+    internal bool CanPlanFetchEgress(in BsvTransactionFetchOutput output) =>
+        output.Kind != BsvTransactionFetchOutputKind.SendGetData ||
+        (output.TransactionId == FetchTargetTransactionId &&
+            FetchState == BsvTransactionFetchState.GetDataWritePending);
 
-    internal OperationStatus ApplyGetDataWriteCommitted(in Hash256 transactionId) =>
-        ApplyFetch(BsvTransactionFetchInput.GetDataWriteCommitted(transactionId));
+    internal bool CanApplyEgressCompletion(in BsvPeerSessionEgressCompletion completion) =>
+        completion.RelayWriteCommitKind switch
+        {
+            BsvPeerSessionRelayWriteCommitKind.Inventory =>
+                completion.SendKind == BsvPeerSessionSendKind.Inventory &&
+                BroadcastState == BsvTransactionBroadcastState.InventoryWritePending &&
+                completion.TransactionId == TargetTransactionId,
+            BsvPeerSessionRelayWriteCommitKind.Transaction =>
+                completion.SendKind == BsvPeerSessionSendKind.Transaction &&
+                BroadcastState == BsvTransactionBroadcastState.TransactionWritePending &&
+                completion.TransactionId == TargetTransactionId,
+            BsvPeerSessionRelayWriteCommitKind.GetData =>
+                completion.SendKind == BsvPeerSessionSendKind.GetData &&
+                FetchState is BsvTransactionFetchState.GetDataWritePending or
+                    BsvTransactionFetchState.Received &&
+                completion.TransactionId == FetchTargetTransactionId,
+            _ => false,
+        };
+
+    internal OperationStatus ApplyEgressCompletion(in BsvPeerSessionEgressCompletion completion) =>
+        completion.RelayWriteCommitKind switch
+        {
+            BsvPeerSessionRelayWriteCommitKind.Inventory =>
+                ApplyBroadcast(
+                    BsvTransactionBroadcastInput.InventoryWriteCommitted(completion.TransactionId)),
+            BsvPeerSessionRelayWriteCommitKind.Transaction =>
+                ApplyBroadcast(
+                    BsvTransactionBroadcastInput.TransactionWriteCommitted(completion.TransactionId)),
+            BsvPeerSessionRelayWriteCommitKind.GetData =>
+                ApplyFetch(BsvTransactionFetchInput.GetDataWriteCommitted(completion.TransactionId)),
+            _ => OperationStatus.InvalidData,
+        };
 
     internal OperationStatus OnPeerInventory(
         bool matchesBroadcast,
