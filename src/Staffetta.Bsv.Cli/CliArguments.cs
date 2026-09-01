@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Net;
 using System.Net.Sockets;
+using Staffetta.Core.Protocol.Cryptography;
 
 namespace Staffetta.Bsv.Cli;
 
@@ -9,6 +10,7 @@ internal enum ReferenceCliCommand
     Handshake,
     PrepareBroadcast,
     Broadcast,
+    Fetch,
 }
 
 internal readonly record struct PeerEndpoint(string Host, int Port)
@@ -24,11 +26,14 @@ internal sealed record CliArguments(
     string? TransactionFile,
     TimeSpan ConnectTimeout,
     TimeSpan HandshakeTimeout,
-    TimeSpan BroadcastTimeout = default)
+    TimeSpan BroadcastTimeout = default,
+    Hash256? TransactionId = null,
+    TimeSpan FetchTimeout = default)
 {
     internal const int DefaultConnectTimeoutMilliseconds = 5_000;
     internal const int DefaultHandshakeTimeoutMilliseconds = 30_000;
     internal const int DefaultBroadcastTimeoutMilliseconds = 30_000;
+    internal const int DefaultFetchTimeoutMilliseconds = 30_000;
 
     internal static bool TryParse(
         IReadOnlyList<string> arguments,
@@ -47,20 +52,24 @@ internal sealed record CliArguments(
 
         if (arguments.Count == 0 || !TryParseCommand(arguments[0], out var command))
         {
-            error = "Expected command 'handshake', 'prepare-broadcast', or 'broadcast'.";
+            error = "Expected command 'handshake', 'prepare-broadcast', 'broadcast', or 'fetch'.";
             return false;
         }
 
         PeerEndpoint? peer = null;
         string? transactionFile = null;
+        Hash256? transactionId = null;
         var connectTimeout = DefaultConnectTimeoutMilliseconds;
         var handshakeTimeout = DefaultHandshakeTimeoutMilliseconds;
         var broadcastTimeout = DefaultBroadcastTimeoutMilliseconds;
+        var fetchTimeout = DefaultFetchTimeoutMilliseconds;
         var hasConnectTimeout = false;
         var hasHandshakeTimeout = false;
         var hasBroadcastTimeout = false;
+        var hasFetchTimeout = false;
         var hasPeer = false;
         var hasTransactionFile = false;
+        var hasTransactionId = false;
         for (var index = 1; index < arguments.Count; index++)
         {
             var option = arguments[index];
@@ -111,6 +120,22 @@ internal sealed record CliArguments(
                     transactionFile = value;
                     hasTransactionFile = true;
                     break;
+                case "--txid":
+                    if (hasTransactionId)
+                    {
+                        error = "Option '--txid' may be specified only once.";
+                        return false;
+                    }
+
+                    if (!TryParseDisplayTransactionId(value, out var parsedTransactionId))
+                    {
+                        error = "Transaction id must be exactly 64 hexadecimal display-order characters.";
+                        return false;
+                    }
+
+                    transactionId = parsedTransactionId;
+                    hasTransactionId = true;
+                    break;
                 case "--connect-timeout-ms":
                     if (hasConnectTimeout)
                     {
@@ -158,13 +183,29 @@ internal sealed record CliArguments(
 
                     hasBroadcastTimeout = true;
                     break;
+                case "--fetch-timeout-ms":
+                    if (hasFetchTimeout)
+                    {
+                        error = "Option '--fetch-timeout-ms' may be specified only once.";
+                        return false;
+                    }
+
+                    if (!TryParsePositiveMilliseconds(value, out fetchTimeout))
+                    {
+                        error = "Fetch timeout must be a positive integer number of milliseconds.";
+                        return false;
+                    }
+
+                    hasFetchTimeout = true;
+                    break;
                 default:
                     error = $"Unknown option '{option}'.";
                     return false;
             }
         }
 
-        if (command is ReferenceCliCommand.Handshake or ReferenceCliCommand.Broadcast && peer is null)
+        if (command is ReferenceCliCommand.Handshake or ReferenceCliCommand.Broadcast or ReferenceCliCommand.Fetch &&
+            peer is null)
         {
             error = "Option '--peer' is required.";
             return false;
@@ -179,6 +220,24 @@ internal sealed record CliArguments(
         if (command == ReferenceCliCommand.Handshake && transactionFile is not null)
         {
             error = "Option '--tx-file' is valid only for prepare-broadcast or broadcast.";
+            return false;
+        }
+
+        if (command == ReferenceCliCommand.Fetch && transactionId is null)
+        {
+            error = "Option '--txid' is required for fetch.";
+            return false;
+        }
+
+        if (command != ReferenceCliCommand.Fetch && transactionId is not null)
+        {
+            error = "Option '--txid' is valid only for fetch.";
+            return false;
+        }
+
+        if (command == ReferenceCliCommand.Fetch && transactionFile is not null)
+        {
+            error = "fetch observes a peer and does not accept '--tx-file'.";
             return false;
         }
 
@@ -201,13 +260,27 @@ internal sealed record CliArguments(
             return false;
         }
 
+        if (command != ReferenceCliCommand.Broadcast && hasBroadcastTimeout)
+        {
+            error = "Option '--broadcast-timeout-ms' is valid only for broadcast.";
+            return false;
+        }
+
+        if (command != ReferenceCliCommand.Fetch && hasFetchTimeout)
+        {
+            error = "Option '--fetch-timeout-ms' is valid only for fetch.";
+            return false;
+        }
+
         parsed = new CliArguments(
             command,
             peer,
             transactionFile,
             TimeSpan.FromMilliseconds(connectTimeout),
             TimeSpan.FromMilliseconds(handshakeTimeout),
-            TimeSpan.FromMilliseconds(broadcastTimeout));
+            TimeSpan.FromMilliseconds(broadcastTimeout),
+            transactionId,
+            TimeSpan.FromMilliseconds(fetchTimeout));
         return true;
     }
 
@@ -218,9 +291,31 @@ internal sealed record CliArguments(
             "handshake" => ReferenceCliCommand.Handshake,
             "prepare-broadcast" => ReferenceCliCommand.PrepareBroadcast,
             "broadcast" => ReferenceCliCommand.Broadcast,
+            "fetch" => ReferenceCliCommand.Fetch,
             _ => default,
         };
-        return value is "handshake" or "prepare-broadcast" or "broadcast";
+        return value is "handshake" or "prepare-broadcast" or "broadcast" or "fetch";
+    }
+
+    private static bool TryParseDisplayTransactionId(string value, out Hash256 transactionId)
+    {
+        transactionId = default;
+        if (value.Length != Hash256.Length * 2)
+        {
+            return false;
+        }
+
+        Span<byte> bytes = stackalloc byte[Hash256.Length];
+        if (Convert.FromHexString(value, bytes, out var charsConsumed, out var bytesWritten) !=
+                System.Buffers.OperationStatus.Done ||
+            charsConsumed != value.Length ||
+            bytesWritten != bytes.Length)
+        {
+            return false;
+        }
+
+        bytes.Reverse();
+        return Hash256.TryCreate(bytes, out transactionId) == System.Buffers.OperationStatus.Done;
     }
 
     private static bool TryParsePeer(string value, out PeerEndpoint endpoint)

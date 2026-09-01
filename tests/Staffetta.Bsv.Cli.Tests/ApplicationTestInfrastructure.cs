@@ -104,7 +104,7 @@ internal sealed class ScriptedDuplexStream : Stream
 {
     private readonly object _gate = new();
     private readonly Queue<byte> _input = new();
-    private readonly bool _endWithEof;
+    private bool _endWithEof;
     private readonly MemoryStream _written = new();
     private readonly TaskCompletionSource _readPending =
         new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -239,6 +239,20 @@ internal sealed class ScriptedDuplexStream : Stream
         }
 
         pending?.Completion.TrySetResult(input.Length);
+        pending?.Registration.Dispose();
+    }
+
+    internal void EndInput()
+    {
+        PendingRead? pending;
+        lock (_gate)
+        {
+            _endWithEof = true;
+            pending = _pendingRead;
+            _pendingRead = null;
+        }
+
+        pending?.Completion.TrySetResult(0);
         pending?.Registration.Dispose();
     }
 

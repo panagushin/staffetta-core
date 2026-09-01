@@ -29,6 +29,15 @@ internal static class ReferenceCliDispatcher
                 cancellationToken);
         }
 
+        if (arguments.Command == ReferenceCliCommand.Fetch)
+        {
+            return new FetchReferenceCliApplication(
+                connectorFactory(),
+                runtime,
+                output,
+                error).RunAsync(arguments, cancellationToken);
+        }
+
         return new BsvReferenceCliApplication(
             connectorFactory(),
             runtime,

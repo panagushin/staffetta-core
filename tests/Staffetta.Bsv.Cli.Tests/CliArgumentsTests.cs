@@ -53,6 +53,13 @@ public sealed class CliArgumentsTests
             ["broadcast", "--peer", "node.example:8333"],
             ["broadcast", "--tx-file", "tx.bin"],
             ["broadcast", "--peer", "node.example:8333", "--tx-file", "tx.bin", "--broadcast-timeout-ms", "1", "--broadcast-timeout-ms", "2"],
+            ["fetch", "--peer", "node.example:8333"],
+            ["fetch", "--txid", new string('0', 64)],
+            ["fetch", "--peer", "node.example:8333", "--txid", "00"],
+            ["fetch", "--peer", "node.example:8333", "--txid", new string('g', 64)],
+            ["fetch", "--peer", "node.example:8333", "--txid", new string('0', 64), "--tx-file", "tx.bin"],
+            ["handshake", "--peer", "node.example:8333", "--txid", new string('0', 64)],
+            ["broadcast", "--peer", "node.example:8333", "--tx-file", "tx.bin", "--fetch-timeout-ms", "1"],
         ];
 
         foreach (var arguments in invalid)
@@ -74,5 +81,16 @@ public sealed class CliArgumentsTests
             out error), error);
         Assert.AreEqual(ReferenceCliCommand.Broadcast, broadcast!.Command);
         Assert.AreEqual(TimeSpan.FromMilliseconds(1234), broadcast.BroadcastTimeout);
+
+        const string displayTransactionId =
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        Assert.IsTrue(CliArguments.TryParse(
+            ["fetch", "--peer", "node.example:8333", "--txid", displayTransactionId, "--fetch-timeout-ms", "4321"],
+            out var fetch,
+            out _,
+            out error), error);
+        Assert.AreEqual(ReferenceCliCommand.Fetch, fetch!.Command);
+        Assert.AreEqual(displayTransactionId, fetch.TransactionId!.Value.ToDisplayHex());
+        Assert.AreEqual(TimeSpan.FromMilliseconds(4321), fetch.FetchTimeout);
     }
 }

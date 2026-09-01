@@ -133,6 +133,72 @@ internal sealed class NdjsonEventWriter
                 transportReason),
             cancellationToken);
 
+    internal ValueTask WriteFetchQueueAsync(
+        string peer,
+        Hash256 transactionId,
+        BsvPeerTransportCommandQueueStatus status,
+        CancellationToken cancellationToken = default) =>
+        WriteAsync(
+            sequence => new FetchQueueEvent(
+                Schema,
+                sequence,
+                "fetch.queue",
+                peer,
+                transactionId.ToDisplayHex(),
+                status.ToString()),
+            cancellationToken);
+
+    internal ValueTask WriteFetchApplicationAsync(
+        string peer,
+        Hash256 transactionId,
+        BsvPeerTransportCommandApplication application,
+        CancellationToken cancellationToken = default) =>
+        WriteAsync(
+            sequence => new FetchApplicationEvent(
+                Schema,
+                sequence,
+                "fetch.application",
+                peer,
+                transactionId.ToDisplayHex(),
+                application.Kind.ToString(),
+                application.Status.ToString()),
+            cancellationToken);
+
+    internal ValueTask WriteFetchFactAsync(
+        string peer,
+        BsvTransactionFetchOutput output,
+        CancellationToken cancellationToken = default) =>
+        WriteAsync(
+            sequence => new FetchFactEvent(
+                Schema,
+                sequence,
+                "fetch.fact",
+                peer,
+                output.TransactionId.ToDisplayHex(),
+                output.Kind.ToString()),
+            cancellationToken);
+
+    internal ValueTask WriteFetchTerminalAsync(
+        string peer,
+        Hash256 transactionId,
+        string outcome,
+        string reason,
+        string? transportKind = null,
+        string? transportReason = null,
+        CancellationToken cancellationToken = default) =>
+        WriteAsync(
+            sequence => new FetchTerminalEvent(
+                Schema,
+                sequence,
+                "fetch.terminal",
+                peer,
+                transactionId.ToDisplayHex(),
+                outcome,
+                reason,
+                transportKind,
+                transportReason),
+            cancellationToken);
+
     internal ValueTask WriteMonetaryValidationAsync(
         BsvTransactionMonetaryValidation validation,
         CancellationToken cancellationToken = default) =>
@@ -269,6 +335,42 @@ internal sealed class NdjsonEventWriter
         string Schema,
         long Sequence,
         string Type,
+        string Txid,
+        string Outcome,
+        string Reason,
+        string? TransportKind,
+        string? TransportReason);
+
+    private sealed record FetchQueueEvent(
+        string Schema,
+        long Sequence,
+        string Type,
+        string Peer,
+        string Txid,
+        string Status);
+
+    private sealed record FetchApplicationEvent(
+        string Schema,
+        long Sequence,
+        string Type,
+        string Peer,
+        string Txid,
+        string Kind,
+        string Status);
+
+    private sealed record FetchFactEvent(
+        string Schema,
+        long Sequence,
+        string Type,
+        string Peer,
+        string Txid,
+        string Fact);
+
+    private sealed record FetchTerminalEvent(
+        string Schema,
+        long Sequence,
+        string Type,
+        string Peer,
         string Txid,
         string Outcome,
         string Reason,

@@ -27,6 +27,9 @@ dotnet run --project src/Staffetta.Bsv.Cli -- \
 
 dotnet run --project src/Staffetta.Bsv.Cli -- \
   broadcast --peer node.example:8333 --tx-file ./transaction.bin
+
+dotnet run --project src/Staffetta.Bsv.Cli -- \
+  fetch --peer node.example:8333 --txid <display-order-transaction-id>
 ```
 
 `prepare-broadcast` is strictly local. It incrementally validates and identifies
@@ -36,3 +39,7 @@ handshake traffic. `broadcast` performs the same local validation before it
 connects, then uses the single peer's `inv`/`getdata`/`tx` flow. Exit code zero
 requires a transport-committed `SentToPeer` fact; relay-back is reported
 separately. The command does not sign, persist, or retry transactions.
+`fetch` subscribes to peer relay inventory for one transaction id, commits a
+matching `getdata`, and succeeds only after the full transaction has been
+streamed, structurally and monetarily validated, and matched to that id. It
+cannot announce or source transaction bytes.
