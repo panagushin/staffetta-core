@@ -97,7 +97,7 @@ internal sealed class AdmittedHeaderChain
         Node? parent = null;
         foreach (AdmittedBlockHeader header in trustedBootstrap)
         {
-            var node = new Node(header, parent);
+            var node = new Node(header, parent, isOnCurrentBestChain: true);
             _nodes.Add(header.Hash, node);
             parent = node;
         }
@@ -115,6 +115,9 @@ internal sealed class AdmittedHeaderChain
         new(trustedBootstrap);
 
     internal bool Contains(Hash256 hash) => _nodes.ContainsKey(hash);
+
+    internal bool IsOnCurrentBestChain(Hash256 hash) =>
+        _nodes.TryGetValue(hash, out Node? node) && node.IsOnCurrentBestChain;
 
     internal bool TryGet(Hash256 hash, out AdmittedBlockHeader header)
     {
@@ -189,7 +192,7 @@ internal sealed class AdmittedHeaderChain
                 BestChainProjectionChange.NoChange(_bestTip.Header));
         }
 
-        var candidate = new Node(admitted, parent);
+        var candidate = new Node(admitted, parent, isOnCurrentBestChain: false);
         BestChainProjectionChange projectionChange = admitted.CumulativeChainWork >
             _bestTip.Header.CumulativeChainWork
             ? RecomputeProjection(_bestTip, candidate)
@@ -198,12 +201,38 @@ internal sealed class AdmittedHeaderChain
         _nodes.Add(admitted.Hash, candidate);
         if (projectionChange.Kind != BestChainProjectionChangeKind.None)
         {
+            ApplyProjectionMembership(_bestTip, candidate, projectionChange.CommonAncestor);
             _bestTip = candidate;
         }
 
         return new AdmittedHeaderCommitResult(
             AdmittedHeaderCommitStatus.Committed,
             projectionChange);
+    }
+
+    private static void ApplyProjectionMembership(
+        Node previousTip,
+        Node currentTip,
+        AdmittedBlockHeader? commonAncestorHeader)
+    {
+        if (commonAncestorHeader is not AdmittedBlockHeader commonAncestor)
+        {
+            throw BrokenAncestry();
+        }
+
+        Node cursor = previousTip;
+        while (cursor.Header.Hash != commonAncestor.Hash)
+        {
+            cursor.IsOnCurrentBestChain = false;
+            cursor = cursor.Parent ?? throw BrokenAncestry();
+        }
+
+        cursor = currentTip;
+        while (cursor.Header.Hash != commonAncestor.Hash)
+        {
+            cursor.IsOnCurrentBestChain = true;
+            cursor = cursor.Parent ?? throw BrokenAncestry();
+        }
     }
 
     private static BestChainProjectionChange RecomputeProjection(Node previousTip, Node currentTip)
@@ -254,5 +283,22 @@ internal sealed class AdmittedHeaderChain
     private static InvalidOperationException BrokenAncestry() =>
         new("The admitted header graph contains disconnected ancestry.");
 
-    private sealed record Node(AdmittedBlockHeader Header, Node? Parent);
+    private sealed class Node
+    {
+        internal Node(
+            AdmittedBlockHeader header,
+            Node? parent,
+            bool isOnCurrentBestChain)
+        {
+            Header = header;
+            Parent = parent;
+            IsOnCurrentBestChain = isOnCurrentBestChain;
+        }
+
+        internal AdmittedBlockHeader Header { get; }
+
+        internal Node? Parent { get; }
+
+        internal bool IsOnCurrentBestChain { get; set; }
+    }
 }

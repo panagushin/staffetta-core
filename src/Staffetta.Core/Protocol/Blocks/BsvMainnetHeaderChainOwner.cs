@@ -106,6 +106,66 @@ internal readonly struct HeaderChainCandidateResult
             hasAdmittedHeader: true);
 }
 
+internal enum CurrentSelectedChainInclusionStatus
+{
+    Uninitialized,
+    Verified,
+    UnknownAdmittedBlock,
+    AdmittedBlockNotOnCurrentSelectedChain,
+    InvalidMerkleProof,
+}
+
+internal readonly record struct CurrentSelectedChainInclusionEvidence(
+    Hash256 TransactionId,
+    Hash256 BlockHash,
+    int BlockHeight,
+    Hash256 MerkleRoot,
+    Hash256 SelectedTipHash,
+    int SelectedTipHeight,
+    UInt256 SelectedTipCumulativeChainWork,
+    long Confirmations);
+
+internal readonly struct CurrentSelectedChainInclusionResult
+{
+    private readonly CurrentSelectedChainInclusionEvidence _evidence;
+    private readonly bool _hasEvidence;
+
+    private CurrentSelectedChainInclusionResult(
+        CurrentSelectedChainInclusionStatus status,
+        MerkleInclusionVerification proofVerification,
+        CurrentSelectedChainInclusionEvidence evidence,
+        bool hasEvidence)
+    {
+        Status = status;
+        ProofVerification = proofVerification;
+        _evidence = evidence;
+        _hasEvidence = hasEvidence;
+    }
+
+    internal CurrentSelectedChainInclusionStatus Status { get; }
+
+    internal MerkleInclusionVerification ProofVerification { get; }
+
+    internal bool TryGetEvidence(out CurrentSelectedChainInclusionEvidence evidence)
+    {
+        evidence = _hasEvidence ? _evidence : default;
+        return _hasEvidence;
+    }
+
+    internal static CurrentSelectedChainInclusionResult Rejected(
+        CurrentSelectedChainInclusionStatus status,
+        MerkleInclusionVerification proofVerification = default) =>
+        new(status, proofVerification, default, hasEvidence: false);
+
+    internal static CurrentSelectedChainInclusionResult Accepted(
+        CurrentSelectedChainInclusionEvidence evidence) =>
+        new(
+            CurrentSelectedChainInclusionStatus.Verified,
+            MerkleInclusionVerification.Verified,
+            evidence,
+            hasEvidence: true);
+}
+
 internal sealed class BsvMainnetHeaderChainOwner
 {
     private static readonly UInt256 MainnetProofOfWorkLimit = CompactTarget.Decode(0x1d00ffff).Value;
@@ -117,6 +177,50 @@ internal sealed class BsvMainnetHeaderChainOwner
     }
 
     internal AdmittedBlockHeader BestTip => _chain.BestTip;
+
+    internal CurrentSelectedChainInclusionResult VerifyCurrentSelectedChainInclusion(
+        Hash256 transactionId,
+        Hash256 blockHash,
+        ulong transactionIndex,
+        ReadOnlySpan<MerkleBranchNode> branch)
+    {
+        if (!_chain.TryGet(blockHash, out AdmittedBlockHeader block))
+        {
+            return CurrentSelectedChainInclusionResult.Rejected(
+                CurrentSelectedChainInclusionStatus.UnknownAdmittedBlock);
+        }
+
+        if (!_chain.IsOnCurrentBestChain(blockHash))
+        {
+            return CurrentSelectedChainInclusionResult.Rejected(
+                CurrentSelectedChainInclusionStatus.AdmittedBlockNotOnCurrentSelectedChain);
+        }
+
+        MerkleInclusionVerification verification = MerkleInclusionVerifier.Verify(
+            transactionId,
+            transactionIndex,
+            branch,
+            block.Header.MerkleRoot);
+        if (verification != MerkleInclusionVerification.Verified)
+        {
+            return CurrentSelectedChainInclusionResult.Rejected(
+                CurrentSelectedChainInclusionStatus.InvalidMerkleProof,
+                verification);
+        }
+
+        AdmittedBlockHeader selectedTip = _chain.BestTip;
+        long confirmations = (long)selectedTip.Height - block.Height + 1;
+        return CurrentSelectedChainInclusionResult.Accepted(
+            new CurrentSelectedChainInclusionEvidence(
+                transactionId,
+                block.Hash,
+                block.Height,
+                block.Header.MerkleRoot,
+                selectedTip.Hash,
+                selectedTip.Height,
+                selectedTip.CumulativeChainWork,
+                confirmations));
+    }
 
     // Imported bootstrap evidence is a trust boundary. This verifies local consistency and claimed PoW,
     // but contextual DAA before the available ancestry remains a provenance-backed checkpoint claim.
