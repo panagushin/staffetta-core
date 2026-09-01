@@ -41,20 +41,25 @@ public sealed class BsvPeerSessionIngressAdapter :
     private readonly BsvHandshakeFrameProcessor _handshakeProcessor;
     private readonly BsvTransactionBroadcastOutput[] _broadcastOutputs =
         new BsvTransactionBroadcastOutput[BsvTransactionBroadcastStateMachine.MaximumOutputCount];
+    private readonly BsvTransactionFetchOutput[] _fetchOutputs =
+        new BsvTransactionFetchOutput[BsvTransactionFetchStateMachine.MaximumOutputCount];
     private readonly InventoryVector[] _inventoryBatch = new InventoryVector[InventoryBatchLength];
     private readonly byte[] _rejectPayload = new byte[RejectPayloadCodec.MaximumPayloadLength];
     private readonly IncrementalInventoryPayloadParser _inventoryParser = new();
     private readonly LegacyTransactionParser _transactionParser;
     private readonly MessageIngressStateMachine _ingress;
     private readonly BsvTransactionBroadcastStateMachine _broadcast = new();
+    private readonly BsvTransactionFetchStateMachine _fetch = new();
 
     private FrameRoute _activeRoute;
     private ulong _activePayloadLength;
     private ulong _activePayloadBytes;
     private int _rejectPayloadLength;
     private int _broadcastOutputCount;
+    private int _fetchOutputCount;
     private bool _hasActiveFrame;
-    private bool _hasMatchingInventory;
+    private bool _hasMatchingBroadcastInventory;
+    private bool _hasMatchingFetchInventory;
     private bool _frameAborted;
     private bool _frameProcessingFailed;
     private bool _isOperating;
@@ -118,12 +123,22 @@ public sealed class BsvPeerSessionIngressAdapter :
 
     public bool IsRejected => _broadcast.IsRejected;
 
+    public BsvTransactionFetchState FetchState => _fetch.State;
+
+    public BsvTransactionFetchTerminalReason FetchTerminalReason => _fetch.TerminalReason;
+
+    public Hash256 FetchTargetTransactionId => _fetch.TargetTransactionId;
+
     public int PendingHandshakeOutputCount => _handshakeProcessor.PendingOutputCount;
 
     public int PendingBroadcastOutputCount => _broadcastOutputCount;
 
+    public int PendingFetchOutputCount => _fetchOutputCount;
+
     public bool HasPendingOutputs =>
-        PendingHandshakeOutputCount != 0 || PendingBroadcastOutputCount != 0;
+        PendingHandshakeOutputCount != 0 ||
+        PendingBroadcastOutputCount != 0 ||
+        PendingFetchOutputCount != 0;
 
     public OperationStatus StartHandshake(ulong localNonce)
     {
@@ -162,6 +177,24 @@ public sealed class BsvPeerSessionIngressAdapter :
         return status;
     }
 
+    public OperationStatus StartFetch(Hash256 transactionId)
+    {
+        ThrowIfUnavailable();
+        if (_isCompleted ||
+            _isIngressUnusable ||
+            HandshakeState != BsvHandshakeState.Ready)
+        {
+            return OperationStatus.InvalidData;
+        }
+
+        if (HasPendingOutputs)
+        {
+            return OperationStatus.DestinationTooSmall;
+        }
+
+        return _fetch.Start(transactionId);
+    }
+
     /// <summary>Records that the complete inventory send intent reached the transport.</summary>
     public OperationStatus ApplyInventoryWriteCommitted(Hash256 transactionId) =>
         ApplyBroadcastWriteCommit(BsvTransactionBroadcastInput.InventoryWriteCommitted(transactionId));
@@ -169,6 +202,10 @@ public sealed class BsvPeerSessionIngressAdapter :
     /// <summary>Records that the complete transaction send intent reached the transport.</summary>
     public OperationStatus ApplyTransactionWriteCommitted(Hash256 transactionId) =>
         ApplyBroadcastWriteCommit(BsvTransactionBroadcastInput.TransactionWriteCommitted(transactionId));
+
+    /// <summary>Records that the complete getdata send intent reached the transport.</summary>
+    public OperationStatus ApplyGetDataWriteCommitted(Hash256 transactionId) =>
+        ApplyFetchWriteCommit(BsvTransactionFetchInput.GetDataWriteCommitted(transactionId));
 
     /// <summary>Consumes no more than one complete wire frame.</summary>
     public OperationStatus Consume(ReadOnlySpan<byte> source, out int bytesConsumed)
@@ -199,7 +236,9 @@ public sealed class BsvPeerSessionIngressAdapter :
         catch
         {
             _isIngressUnusable = true;
-            TerminateBroadcast(BsvTransactionBroadcastInput.ExternalFailure());
+            TerminateRelay(
+                BsvTransactionBroadcastInput.ExternalFailure(),
+                BsvTransactionFetchInput.ExternalFailure());
             throw;
         }
         finally
@@ -212,7 +251,9 @@ public sealed class BsvPeerSessionIngressAdapter :
         if (status == OperationStatus.InvalidData || _frameAborted || _frameProcessingFailed)
         {
             _isIngressUnusable = true;
-            TerminateBroadcast(BsvTransactionBroadcastInput.WireViolation());
+            TerminateRelay(
+                BsvTransactionBroadcastInput.WireViolation(),
+                BsvTransactionFetchInput.WireViolation());
             if (!_frameAborted)
             {
                 _handshakeProcessor.ApplyWireViolation();
@@ -250,6 +291,24 @@ public sealed class BsvPeerSessionIngressAdapter :
         return OperationStatus.Done;
     }
 
+    public OperationStatus DrainFetchOutputs(
+        Span<BsvTransactionFetchOutput> destination,
+        out int outputsWritten)
+    {
+        ThrowIfUnavailable();
+        outputsWritten = 0;
+        if (destination.Length < _fetchOutputCount)
+        {
+            return OperationStatus.DestinationTooSmall;
+        }
+
+        _fetchOutputs.AsSpan(0, _fetchOutputCount).CopyTo(destination);
+        outputsWritten = _fetchOutputCount;
+        _fetchOutputs.AsSpan(0, _fetchOutputCount).Clear();
+        _fetchOutputCount = 0;
+        return OperationStatus.Done;
+    }
+
     public OperationStatus CompleteEndOfInput()
     {
         ThrowIfUnavailable();
@@ -274,7 +333,9 @@ public sealed class BsvPeerSessionIngressAdapter :
         catch
         {
             _isIngressUnusable = true;
-            TerminateBroadcast(BsvTransactionBroadcastInput.ExternalFailure());
+            TerminateRelay(
+                BsvTransactionBroadcastInput.ExternalFailure(),
+                BsvTransactionFetchInput.ExternalFailure());
             throw;
         }
         finally
@@ -286,12 +347,16 @@ public sealed class BsvPeerSessionIngressAdapter :
         if (status == OperationStatus.InvalidData)
         {
             _isIngressUnusable = true;
-            TerminateBroadcast(BsvTransactionBroadcastInput.Disconnected());
+            TerminateRelay(
+                BsvTransactionBroadcastInput.Disconnected(),
+                BsvTransactionFetchInput.Disconnected());
             return status;
         }
 
         _isCompleted = true;
-        TerminateBroadcast(BsvTransactionBroadcastInput.Disconnected());
+        TerminateRelay(
+            BsvTransactionBroadcastInput.Disconnected(),
+            BsvTransactionFetchInput.Disconnected());
         return OperationStatus.Done;
     }
 
@@ -309,11 +374,14 @@ public sealed class BsvPeerSessionIngressAdapter :
             throw new InvalidOperationException("Peer session cannot be disposed from an ingress callback.");
         }
 
-        TerminateBroadcast(BsvTransactionBroadcastInput.Disconnected());
+        TerminateRelay(
+            BsvTransactionBroadcastInput.Disconnected(),
+            BsvTransactionFetchInput.Disconnected());
         _transactionParser.Dispose();
         _handshakeProcessor.Dispose();
         _ingress.Dispose();
         _broadcastOutputs.AsSpan().Clear();
+        _fetchOutputs.AsSpan().Clear();
         _inventoryBatch.AsSpan().Clear();
         _rejectPayload.AsSpan().Clear();
         _isDisposed = true;
@@ -440,6 +508,33 @@ public sealed class BsvPeerSessionIngressAdapter :
         return status;
     }
 
+    private OperationStatus ApplyFetchWriteCommit(BsvTransactionFetchInput input)
+    {
+        ThrowIfUnavailable();
+        if (_isCompleted || _isIngressUnusable || HandshakeState != BsvHandshakeState.Ready)
+        {
+            return OperationStatus.InvalidData;
+        }
+
+        if (HasPendingOutputs)
+        {
+            return OperationStatus.DestinationTooSmall;
+        }
+
+        return ApplyFetch(input);
+    }
+
+    private OperationStatus ApplyFetch(BsvTransactionFetchInput input)
+    {
+        var status = _fetch.Apply(input, _fetchOutputs, out var outputsWritten);
+        if (status == OperationStatus.Done)
+        {
+            _fetchOutputCount = outputsWritten;
+        }
+
+        return status;
+    }
+
     private OperationStatus ConsumeInventoryPayload(ReadOnlySpan<byte> payload)
     {
         var offset = 0;
@@ -460,10 +555,17 @@ public sealed class BsvPeerSessionIngressAdapter :
             for (var index = 0; index < vectorsWritten; index++)
             {
                 ref readonly var vector = ref _inventoryBatch[index];
-                _hasMatchingInventory |=
-                    vector.Type == TransactionInventoryType &&
+                if (vector.Type != TransactionInventoryType)
+                {
+                    continue;
+                }
+
+                _hasMatchingBroadcastInventory |=
                     BroadcastState != BsvTransactionBroadcastState.Created &&
                     vector.Hash == TargetTransactionId;
+                _hasMatchingFetchInventory |=
+                    FetchState != BsvTransactionFetchState.Created &&
+                    vector.Hash == FetchTargetTransactionId;
             }
 
             _inventoryBatch.AsSpan(0, vectorsWritten).Clear();
@@ -536,20 +638,41 @@ public sealed class BsvPeerSessionIngressAdapter :
                     return OperationStatus.InvalidData;
                 }
 
-                if (!_hasMatchingInventory ||
-                    BroadcastState == BsvTransactionBroadcastState.Created)
+                if (_activeRoute == FrameRoute.Inventory)
                 {
+                    if (_hasMatchingBroadcastInventory &&
+                        BroadcastState != BsvTransactionBroadcastState.Created &&
+                        ApplyBroadcast(
+                            BsvTransactionBroadcastInput.PeerInventory(TargetTransactionId)) !=
+                        OperationStatus.Done)
+                    {
+                        return OperationStatus.InvalidData;
+                    }
+
+                    if (_hasMatchingFetchInventory &&
+                        FetchState != BsvTransactionFetchState.Created &&
+                        ApplyFetch(
+                            BsvTransactionFetchInput.PeerInventory(FetchTargetTransactionId)) !=
+                        OperationStatus.Done)
+                    {
+                        return OperationStatus.InvalidData;
+                    }
+
                     return OperationStatus.Done;
                 }
 
-                return _activeRoute switch
+                if (_activeRoute == FrameRoute.GetData)
                 {
-                    FrameRoute.Inventory => ApplyBroadcast(
-                        BsvTransactionBroadcastInput.PeerInventory(TargetTransactionId)),
-                    FrameRoute.GetData => ApplyBroadcast(
-                        BsvTransactionBroadcastInput.PeerGetData(TargetTransactionId)),
-                    _ => OperationStatus.Done,
-                };
+                    return _hasMatchingBroadcastInventory &&
+                        BroadcastState != BsvTransactionBroadcastState.Created
+                        ? ApplyBroadcast(BsvTransactionBroadcastInput.PeerGetData(TargetTransactionId))
+                        : OperationStatus.Done;
+                }
+
+                return _hasMatchingFetchInventory &&
+                    FetchState != BsvTransactionFetchState.Created
+                    ? ApplyFetch(BsvTransactionFetchInput.PeerNotFound(FetchTargetTransactionId))
+                    : OperationStatus.Done;
 
             case FrameRoute.Transaction:
                 if (!_transactionParser.IsReadyToCommit ||
@@ -559,10 +682,17 @@ public sealed class BsvPeerSessionIngressAdapter :
                     return OperationStatus.InvalidData;
                 }
 
-                return _transactionParser.Commit(
+                var commitStatus = _transactionParser.Commit(
                     payloadHash,
                     _activePayloadLength,
-                    out _);
+                    out var summary);
+                if (commitStatus != OperationStatus.Done ||
+                    FetchState == BsvTransactionFetchState.Created)
+                {
+                    return commitStatus;
+                }
+
+                return ApplyFetch(BsvTransactionFetchInput.PeerTransaction(summary.TransactionId));
 
             case FrameRoute.RelayReject:
                 var rejectStatus = RejectPayloadCodec.TryParse(
@@ -596,21 +726,32 @@ public sealed class BsvPeerSessionIngressAdapter :
         }
     }
 
-    private void TerminateBroadcast(BsvTransactionBroadcastInput input)
+    private void TerminateRelay(
+        BsvTransactionBroadcastInput broadcastInput,
+        BsvTransactionFetchInput fetchInput)
     {
         _broadcastOutputs.AsSpan().Clear();
         _broadcastOutputCount = 0;
+        _fetchOutputs.AsSpan().Clear();
+        _fetchOutputCount = 0;
         Span<BsvHandshakeOutput> discardedHandshakeOutputs =
             stackalloc BsvHandshakeOutput[BsvHandshakeStateMachine.MaximumOutputCount];
         _ = _handshakeProcessor.DrainOutputs(discardedHandshakeOutputs, out _);
-        if (BroadcastState is BsvTransactionBroadcastState.Created or
-            BsvTransactionBroadcastState.Terminal)
+        if (BroadcastState is not BsvTransactionBroadcastState.Created and
+            not BsvTransactionBroadcastState.Terminal)
         {
-            return;
+            _ = _broadcast.Apply(broadcastInput, _broadcastOutputs, out _);
+            _broadcastOutputs.AsSpan().Clear();
         }
 
-        _ = _broadcast.Apply(input, _broadcastOutputs, out _);
-        _broadcastOutputs.AsSpan().Clear();
+        if (FetchState is not BsvTransactionFetchState.Created and
+            not BsvTransactionFetchState.Received and
+            not BsvTransactionFetchState.NotFound and
+            not BsvTransactionFetchState.Terminal)
+        {
+            _ = _fetch.Apply(fetchInput, _fetchOutputs, out _);
+            _fetchOutputs.AsSpan().Clear();
+        }
     }
 
     private void ResetActiveFrame()
@@ -622,7 +763,8 @@ public sealed class BsvPeerSessionIngressAdapter :
         _activePayloadBytes = 0;
         _rejectPayloadLength = 0;
         _hasActiveFrame = false;
-        _hasMatchingInventory = false;
+        _hasMatchingBroadcastInventory = false;
+        _hasMatchingFetchInventory = false;
     }
 
     private void ThrowIfUnavailable()
