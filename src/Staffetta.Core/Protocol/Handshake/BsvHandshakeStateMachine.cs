@@ -12,10 +12,13 @@ namespace Staffetta.Core.Protocol.Handshake;
 public sealed class BsvHandshakeStateMachine
 {
     // The BSV protocol default applies until a valid protoconf advertises a larger limit.
+    /// <summary>The effective receive limit in bytes until a valid peer protoconf is accepted.</summary>
     public const uint DefaultPeerMaximumReceivePayloadLength = 1_048_576;
 
+    /// <summary>The minimum acceptable receive limit advertised by peer protoconf, in bytes.</summary>
     public const uint MinimumPeerReceivePayloadLength = DefaultPeerMaximumReceivePayloadLength;
 
+    /// <summary>The maximum number of outputs produced by a single transition.</summary>
     public const int MaximumOutputCount = 3;
 
     private readonly int _minimumPeerProtocolVersion;
@@ -32,6 +35,9 @@ public sealed class BsvHandshakeStateMachine
     private bool _hasPeerProtoconf;
     private bool _hasPendingPing;
 
+    /// <summary>Creates a handshake using the caller-selected minimum acceptable peer version.</summary>
+    /// <param name="minimumPeerProtocolVersion">A positive protocol version chosen by the caller or profile.</param>
+    /// <exception cref="ArgumentOutOfRangeException">The minimum version is not positive.</exception>
     public BsvHandshakeStateMachine(int minimumPeerProtocolVersion)
     {
         if (minimumPeerProtocolVersion <= 0)
@@ -44,30 +50,46 @@ public sealed class BsvHandshakeStateMachine
         _minimumPeerProtocolVersion = minimumPeerProtocolVersion;
     }
 
+    /// <summary>Gets the current handshake phase; readiness reflects accepted peer events and local send intents.</summary>
     public BsvHandshakeState State { get; private set; }
 
+    /// <summary>Gets the stable terminal reason, or None before termination.</summary>
     public BsvHandshakeTerminalReason TerminalReason { get; private set; }
 
+    /// <summary>Gets the caller-selected minimum acceptable peer version.</summary>
     public int MinimumPeerProtocolVersion => _minimumPeerProtocolVersion;
 
+    /// <summary>Gets whether a peer version was accepted.</summary>
     public bool HasPeerVersion => _hasPeerVersion;
 
+    /// <summary>Gets the accepted peer version, or zero until HasPeerVersion is true.</summary>
     public int PeerProtocolVersion => _peerProtocolVersion;
 
+    /// <summary>Gets the accepted peer nonce, or zero until HasPeerVersion is true.</summary>
     public ulong PeerNonce => _peerNonce;
 
+    /// <summary>Gets whether a peer verack was accepted, including one received before version.</summary>
     public bool HasPeerVerack => _hasPeerVerack;
 
+    /// <summary>Gets whether a timely, valid peer protoconf was accepted.</summary>
     public bool HasPeerProtoconf => _hasPeerProtoconf;
 
+    /// <summary>Gets the accepted advertised receive limit, or zero until HasPeerProtoconf is true.</summary>
     public uint AdvertisedPeerMaximumReceivePayloadLength => _peerMaximumReceivePayloadLength;
 
+    /// <summary>Gets the accepted advertised receive limit or the protocol default when no protoconf was accepted.</summary>
     public uint EffectivePeerMaximumReceivePayloadLength => _hasPeerProtoconf
         ? _peerMaximumReceivePayloadLength
         : DefaultPeerMaximumReceivePayloadLength;
 
+    /// <summary>Gets whether a local ping intent awaits a matching validated pong; not proof that the ping was written.</summary>
     public bool HasPendingPing => _hasPendingPing;
 
+    /// <summary>Starts negotiation once and emits the local version intent.</summary>
+    /// <param name="localNonce">The caller-generated nonce used for self-connection detection.</param>
+    /// <param name="destination">Caller-owned output storage; not retained.</param>
+    /// <param name="outputsWritten">One on success; otherwise zero.</param>
+    /// <returns>Done, InvalidData if already started, or DestinationTooSmall if no output slot is available. Non-success changes neither state nor destination.</returns>
     public OperationStatus Start(
         ulong localNonce,
         Span<BsvHandshakeOutput> destination,
@@ -92,6 +114,12 @@ public sealed class BsvHandshakeStateMachine
         return OperationStatus.Done;
     }
 
+    /// <summary>Applies one validated peer event or caller-reported failure and emits its outputs atomically.</summary>
+    /// <param name="input">The event to process; the caller must validate peer data before constructing it.</param>
+    /// <param name="destination">Caller-owned output storage; not retained. BsvHandshakeStateMachine.MaximumOutputCount slots suffice.</param>
+    /// <param name="outputsWritten">The emitted output count, or zero if no output is produced or the call fails.</param>
+    /// <returns>Done for an accepted or ignored event; InvalidData for invalid call state or input; DestinationTooSmall without state or destination changes so the same event can be retried.</returns>
+    /// <remarks>Terminal state ignores all further inputs and returns Done. Protocol violations may return Done while changing State to Terminal; inspect State and TerminalReason. Send outputs remain intents, not committed transport facts.</remarks>
     public OperationStatus Apply(
         BsvHandshakeInput input,
         Span<BsvHandshakeOutput> destination,
@@ -122,6 +150,11 @@ public sealed class BsvHandshakeStateMachine
         };
     }
 
+    /// <summary>Emits one local ping intent while ready, allowing only one outstanding nonce.</summary>
+    /// <param name="nonce">The caller-generated nonce to match against a validated pong.</param>
+    /// <param name="destination">Caller-owned storage for one output; not retained.</param>
+    /// <param name="outputsWritten">One on success; otherwise zero.</param>
+    /// <returns>Done, InvalidData when not ready or a ping is pending, or DestinationTooSmall. Non-success changes neither state nor destination.</returns>
     public OperationStatus TryBeginPing(
         ulong nonce,
         Span<BsvHandshakeOutput> destination,

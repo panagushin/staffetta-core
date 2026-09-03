@@ -13,6 +13,7 @@ public readonly struct MessageIngressResult
         PayloadDoubleSha256 = payloadDoubleSha256;
     }
 
+    /// <summary>Gets whether framing succeeded or the started frame was aborted; success does not validate payload structure.</summary>
     public MessageIngressCompletion Completion { get; }
 
     /// <summary>

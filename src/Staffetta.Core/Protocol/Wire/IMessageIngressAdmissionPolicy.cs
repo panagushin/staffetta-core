@@ -9,5 +9,8 @@ namespace Staffetta.Core.Protocol.Wire;
 /// </remarks>
 public interface IMessageIngressAdmissionPolicy
 {
+    /// <summary>Decides whether to process a parsed header before payload allocation or sink notification.</summary>
+    /// <param name="header">Declared command, length, checksum, and format; the payload is not yet validated.</param>
+    /// <returns>True to admit the frame; false to permanently fault ingress at its header boundary.</returns>
     bool IsAdmitted(in MessageHeader header);
 }

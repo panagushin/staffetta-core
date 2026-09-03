@@ -4,8 +4,10 @@ using Staffetta.Core.Protocol.Cryptography;
 
 namespace Staffetta.Core.Protocol.Blocks;
 
+/// <summary>Encodes and decodes fixed-width block headers without consensus or chain-context validation.</summary>
 public static class BlockHeaderCodec
 {
+    /// <summary>The serialized header length in bytes.</summary>
     public const int EncodedLength = 80;
 
     private const int VersionOffset = 0;
@@ -15,6 +17,11 @@ public static class BlockHeaderCodec
     private const int BitsOffset = TimestampOffset + sizeof(uint);
     private const int NonceOffset = BitsOffset + sizeof(uint);
 
+    /// <summary>Copies one header from the beginning of the source, preserving hash wire order.</summary>
+    /// <param name="source">Bytes beginning at a header; trailing bytes are allowed.</param>
+    /// <param name="header">The decoded header on success; otherwise the default value.</param>
+    /// <param name="bytesConsumed">80 on success; otherwise zero.</param>
+    /// <returns><see cref="OperationStatus.Done"/> or <see cref="OperationStatus.NeedMoreData"/>.</returns>
     public static OperationStatus TryParse(
         ReadOnlySpan<byte> source,
         out BlockHeader header,
@@ -38,6 +45,11 @@ public static class BlockHeaderCodec
         return OperationStatus.Done;
     }
 
+    /// <summary>Writes one header, leaving an undersized destination unchanged.</summary>
+    /// <param name="destination">Storage for at least 80 bytes; trailing bytes are untouched.</param>
+    /// <param name="header">The fields to serialize without validity checks.</param>
+    /// <param name="bytesWritten">80 on success; otherwise zero.</param>
+    /// <returns><see cref="OperationStatus.Done"/> or <see cref="OperationStatus.DestinationTooSmall"/>.</returns>
     public static OperationStatus TryWrite(
         Span<byte> destination,
         in BlockHeader header,

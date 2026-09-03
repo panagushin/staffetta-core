@@ -18,6 +18,9 @@ namespace Staffetta.Core.Protocol.Sessions;
 /// frame is fully acknowledged.
 /// Transaction sink callbacks remain provisional until both the transaction structure and its
 /// enclosing frame are validated.
+/// The transport-write planner and acknowledgements are internal. External library consumers
+/// should use the standalone codecs and state machines rather than treating this adapter as a
+/// complete public session driver.
 /// </remarks>
 public sealed class BsvPeerSessionIngressAdapter :
     IMessageIngressSink,
@@ -26,11 +29,14 @@ public sealed class BsvPeerSessionIngressAdapter :
     IBsvPeerSessionEgressCompletionOwner,
     IDisposable
 {
+    /// <summary>Maximum inventory vectors admitted by this session's BSV interop profile.</summary>
     public const ulong MaximumInventoryCount = BsvPeerSessionFrameProcessor.MaximumInventoryCount;
 
+    /// <summary>Resource-policy bound on ignored payloads, not a network consensus limit.</summary>
     public const ulong MaximumIgnoredPayloadLength =
         BsvPeerSessionFrameProcessor.MaximumIgnoredPayloadLength;
 
+    /// <summary>Largest encoded inventory payload admitted by this session's interop profile.</summary>
     public const ulong MaximumInventoryPayloadLength =
         BsvPeerSessionFrameProcessor.MaximumInventoryPayloadLength;
 
@@ -45,6 +51,11 @@ public sealed class BsvPeerSessionIngressAdapter :
     private bool _isEgressDisposed;
     private bool _isDisposed;
 
+    /// <summary>Creates a single-consumer session with caller-selected network and resource admission bounds.</summary>
+    /// <param name="expectedNetworkMagic">Exactly four network-magic bytes, copied during construction.</param>
+    /// <param name="maximumPayloadLength">Maximum declared frame payload admitted without size-based allocation.</param>
+    /// <param name="minimumPeerProtocolVersion">Lowest accepted peer version number.</param>
+    /// <param name="transactionSink">Receives provisional transaction callbacks; commits require full frame validation.</param>
     public BsvPeerSessionIngressAdapter(
         ReadOnlySpan<byte> expectedNetworkMagic,
         ulong maximumPayloadLength,
@@ -65,61 +76,86 @@ public sealed class BsvPeerSessionIngressAdapter :
         _egress = new BsvPeerSessionEgressPlanner(expectedNetworkMagic, this);
     }
 
+    /// <summary>Current handshake state; reading it performs no I/O.</summary>
     public BsvHandshakeState HandshakeState => _processor.HandshakeState;
 
+    /// <summary>Handshake termination reason, or none before termination.</summary>
     public BsvHandshakeTerminalReason HandshakeTerminalReason =>
         _processor.HandshakeTerminalReason;
 
+    /// <summary>Whether a peer version payload has passed frame and handshake admission.</summary>
     public bool HasPeerVersion => _processor.HasPeerVersion;
 
+    /// <summary>Admitted peer version, meaningful when <see cref="HasPeerVersion"/> is true.</summary>
     public int PeerProtocolVersion => _processor.PeerProtocolVersion;
 
+    /// <summary>Nonce from the admitted peer version payload.</summary>
     public ulong PeerNonce => _processor.PeerNonce;
 
+    /// <summary>Whether a validated peer verack has been observed.</summary>
     public bool HasPeerVerack => _processor.HasPeerVerack;
 
+    /// <summary>Whether a peer protoconf has been admitted.</summary>
     public bool HasPeerProtoconf => _processor.HasPeerProtoconf;
 
+    /// <summary>Peer receive bound accepted by the handshake, including its legacy default floor.</summary>
     public uint EffectivePeerMaximumReceivePayloadLength =>
         _processor.EffectivePeerMaximumReceivePayloadLength;
 
+    /// <summary>Current broadcast state for the session's target transaction.</summary>
     public BsvTransactionBroadcastState BroadcastState => _processor.BroadcastState;
 
+    /// <summary>Broadcast termination reason, independent of whether earlier wire facts were committed.</summary>
     public BsvTransactionBroadcastTerminalReason BroadcastTerminalReason =>
         _processor.BroadcastTerminalReason;
 
+    /// <summary>Broadcast target txid, assigned by <see cref="StartBroadcast"/>.</summary>
     public Hash256 TargetTransactionId => _processor.TargetTransactionId;
 
+    /// <summary>Whether the target inventory announcement was transport-committed.</summary>
     public bool IsAnnounced => _processor.IsAnnounced;
 
+    /// <summary>Whether a matching peer getdata request was admitted by the broadcast flow.</summary>
     public bool WasRequestedByPeer => _processor.WasRequestedByPeer;
 
+    /// <summary>Whether target transaction bytes were transport-committed with matching identity; not mining acceptance.</summary>
     public bool IsSentToPeer => _processor.IsSentToPeer;
 
+    /// <summary>Whether peer inventory echoed the broadcast target; not proof of independent propagation.</summary>
     public bool WasObservedFromPeer => _processor.WasObservedFromPeer;
 
+    /// <summary>Whether a peer rejection was correlated to the broadcast transaction.</summary>
     public bool IsRejected => _processor.IsRejected;
 
+    /// <summary>Current fetch state for the requested transaction.</summary>
     public BsvTransactionFetchState FetchState => _processor.FetchState;
 
+    /// <summary>Fetch termination reason, or none before termination.</summary>
     public BsvTransactionFetchTerminalReason FetchTerminalReason => _processor.FetchTerminalReason;
 
+    /// <summary>Fetch target txid, assigned by <see cref="StartFetch"/>.</summary>
     public Hash256 FetchTargetTransactionId => _processor.FetchTargetTransactionId;
 
+    /// <summary>Number of handshake outputs awaiting drainage.</summary>
     public int PendingHandshakeOutputCount => _processor.PendingHandshakeOutputCount;
 
     internal int PendingHandshakeEgressIntentCount =>
         _processor.PendingHandshakeEgressIntentCount;
 
+    /// <summary>Number of broadcast intents or facts awaiting drainage.</summary>
     public int PendingBroadcastOutputCount => _processor.PendingBroadcastOutputCount;
 
+    /// <summary>Number of fetch intents or facts awaiting drainage.</summary>
     public int PendingFetchOutputCount => _processor.PendingFetchOutputCount;
 
     internal int PendingMonetaryValidationCount =>
         _processor.PendingMonetaryValidationCount;
 
+    /// <summary>Whether outputs remain, including monetary verdicts drained by the internal transport integration.</summary>
     public bool HasPendingOutputs => _processor.HasPendingOutputs;
 
+    /// <summary>Begins an outbound handshake; a queued version intent is not a committed wire write.</summary>
+    /// <returns>Done on acceptance, DestinationTooSmall while outputs or egress intents remain, otherwise InvalidData.</returns>
     public OperationStatus StartHandshake(ulong localNonce)
     {
         ThrowIfUnavailable();
@@ -136,6 +172,8 @@ public sealed class BsvPeerSessionIngressAdapter :
         return _processor.StartHandshake(localNonce);
     }
 
+    /// <summary>Starts a broadcast in a ready session without providing or signing transaction bytes.</summary>
+    /// <returns>Done on acceptance, DestinationTooSmall for pending outputs, or InvalidData for an unavailable flow.</returns>
     public OperationStatus StartBroadcast(Hash256 transactionId)
     {
         ThrowIfUnavailable();
@@ -152,6 +190,8 @@ public sealed class BsvPeerSessionIngressAdapter :
         return _processor.StartBroadcast(transactionId);
     }
 
+    /// <summary>Starts waiting for peer inventory of a transaction in a ready session.</summary>
+    /// <returns>Done on acceptance, DestinationTooSmall for pending outputs, or InvalidData for an unavailable flow.</returns>
     public OperationStatus StartFetch(Hash256 transactionId)
     {
         ThrowIfUnavailable();
@@ -364,6 +404,9 @@ public sealed class BsvPeerSessionIngressAdapter :
     }
 
     /// <summary>Consumes no more than one complete wire frame.</summary>
+    /// <param name="source">Borrowed wire bytes; unconsumed bytes remain caller-owned.</param>
+    /// <param name="bytesConsumed">Number of bytes accepted from this call, including partial frames.</param>
+    /// <returns>Done for a completed frame, NeedMoreData for partial input, DestinationTooSmall while outputs block consumption, or InvalidData for a terminal violation.</returns>
     public OperationStatus Consume(ReadOnlySpan<byte> source, out int bytesConsumed)
     {
         ThrowIfUnavailable();
@@ -420,6 +463,8 @@ public sealed class BsvPeerSessionIngressAdapter :
         return status;
     }
 
+    /// <summary>Copies pending handshake outputs to the caller without acknowledging any transport write.</summary>
+    /// <returns>DestinationTooSmall if the batch does not fit or previous egress intents remain, Done on drainage, or InvalidData if internal intent admission fails.</returns>
     public OperationStatus DrainHandshakeOutputs(
         Span<BsvHandshakeOutput> destination,
         out int outputsWritten)
@@ -428,6 +473,8 @@ public sealed class BsvPeerSessionIngressAdapter :
         return _processor.DrainHandshakeOutputs(destination, out outputsWritten);
     }
 
+    /// <summary>Copies pending broadcast intents and committed facts; draining an intent is not sending it.</summary>
+    /// <returns>DestinationTooSmall without draining if the entire batch does not fit; otherwise Done.</returns>
     public OperationStatus DrainBroadcastOutputs(
         Span<BsvTransactionBroadcastOutput> destination,
         out int outputsWritten)
@@ -436,6 +483,8 @@ public sealed class BsvPeerSessionIngressAdapter :
         return _processor.DrainBroadcastOutputs(destination, out outputsWritten);
     }
 
+    /// <summary>Copies pending fetch intents and facts without performing I/O.</summary>
+    /// <returns>DestinationTooSmall without draining if the entire batch does not fit; otherwise Done.</returns>
     public OperationStatus DrainFetchOutputs(
         Span<BsvTransactionFetchOutput> destination,
         out int outputsWritten)
@@ -452,6 +501,8 @@ public sealed class BsvPeerSessionIngressAdapter :
         return _processor.DrainMonetaryValidations(destination, out outputsWritten);
     }
 
+    /// <summary>Terminates peer input and aborts an incomplete frame. Drain pending outputs before calling.</summary>
+    /// <returns>Done at a clean frame boundary (also on repetition), or InvalidData for truncation or unusable ingress.</returns>
     public OperationStatus CompleteEndOfInput()
     {
         ThrowIfUnavailable();
@@ -495,6 +546,7 @@ public sealed class BsvPeerSessionIngressAdapter :
         return OperationStatus.Done;
     }
 
+    /// <summary>Terminates the session and releases hash state; may not be called from an ingress callback.</summary>
     public void Dispose()
     {
         if (_isDisposed)

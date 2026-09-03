@@ -32,6 +32,12 @@ public sealed class MessageIngressStateMachine : IDisposable
     private bool _isFaulted;
     private bool _isDisposed;
 
+    /// <summary>Creates ingress with a copied network magic and no per-header admission or extended-hash policy.</summary>
+    /// <param name="expectedNetworkMagic">Exactly four network-magic bytes; copied during construction.</param>
+    /// <param name="maximumPayloadLength">The inclusive payload-length limit, checked before starting a frame.</param>
+    /// <param name="sink">The synchronous frame sink; retained but not disposed by ingress.</param>
+    /// <exception cref="ArgumentException">Network magic does not contain exactly four bytes.</exception>
+    /// <exception cref="ArgumentNullException">The sink is null.</exception>
     public MessageIngressStateMachine(
         ReadOnlySpan<byte> expectedNetworkMagic,
         ulong maximumPayloadLength,
@@ -45,6 +51,13 @@ public sealed class MessageIngressStateMachine : IDisposable
     {
     }
 
+    /// <summary>Creates ingress with an optional header admission policy and length-only extended validation.</summary>
+    /// <param name="expectedNetworkMagic">Exactly four network-magic bytes; copied during construction.</param>
+    /// <param name="maximumPayloadLength">The inclusive payload-length limit.</param>
+    /// <param name="sink">The synchronous frame sink; retained but not disposed by ingress.</param>
+    /// <param name="admissionPolicy">An optional retained policy called before payload processing.</param>
+    /// <exception cref="ArgumentException">Network magic does not contain exactly four bytes.</exception>
+    /// <exception cref="ArgumentNullException">The sink is null.</exception>
     public MessageIngressStateMachine(
         ReadOnlySpan<byte> expectedNetworkMagic,
         ulong maximumPayloadLength,
@@ -54,6 +67,14 @@ public sealed class MessageIngressStateMachine : IDisposable
     {
     }
 
+    /// <summary>Creates ingress with optional admission and extended-payload hashing policies.</summary>
+    /// <param name="expectedNetworkMagic">Exactly four network-magic bytes; copied during construction.</param>
+    /// <param name="maximumPayloadLength">The inclusive payload-length limit.</param>
+    /// <param name="sink">The synchronous frame sink; retained but not disposed by ingress.</param>
+    /// <param name="admissionPolicy">An optional retained policy called before payload processing.</param>
+    /// <param name="payloadHashPolicy">An optional retained policy selecting extended frames whose full digest is needed.</param>
+    /// <exception cref="ArgumentException">Network magic does not contain exactly four bytes.</exception>
+    /// <exception cref="ArgumentNullException">The sink is null.</exception>
     public MessageIngressStateMachine(
         ReadOnlySpan<byte> expectedNetworkMagic,
         ulong maximumPayloadLength,
@@ -75,10 +96,19 @@ public sealed class MessageIngressStateMachine : IDisposable
         _payloadHashPolicy = payloadHashPolicy;
     }
 
+    /// <summary>Gets whether end of input was declared; inspect IsFaulted to distinguish clean completion from truncation.</summary>
     public bool IsCompleted => _isCompleted;
 
+    /// <summary>Gets whether a permanent framing, policy, or callback failure prevents further consumption.</summary>
     public bool IsFaulted => _isFaulted;
 
+    /// <summary>Incrementally consumes as many frames as the supplied bytes permit.</summary>
+    /// <param name="source">Caller-owned input; only incomplete header bytes are copied and retained.</param>
+    /// <param name="bytesConsumed">Bytes accepted from this call, including those accepted before an error or callback exception.</param>
+    /// <returns>Done at a completed frame boundary; NeedMoreData for an incomplete next header or payload; InvalidData for a permanent fault.</returns>
+    /// <remarks>Use the consumed count even on failure. No payload backpressure is supported. Sink payload bytes remain provisional until completion and higher-level validation.</remarks>
+    /// <exception cref="ObjectDisposedException">Ingress has been disposed.</exception>
+    /// <exception cref="InvalidOperationException">Ingress is re-entered or clean end of input was already declared.</exception>
     public OperationStatus Consume(
         ReadOnlySpan<byte> source,
         out int bytesConsumed) =>
@@ -87,6 +117,11 @@ public sealed class MessageIngressStateMachine : IDisposable
     /// <summary>
     /// Consumes no more than one wire frame, leaving any following frame untouched.
     /// </summary>
+    /// <param name="source">Caller-owned input; no payload slice is retained.</param>
+    /// <param name="bytesConsumed">Bytes accepted from this call, including bytes accepted before failure; any following frame is untouched.</param>
+    /// <returns>Done after one frame, NeedMoreData for an incomplete frame, or InvalidData for a permanent fault.</returns>
+    /// <exception cref="ObjectDisposedException">Ingress has been disposed.</exception>
+    /// <exception cref="InvalidOperationException">Ingress is re-entered or clean end of input was already declared.</exception>
     public OperationStatus ConsumeSingleFrame(
         ReadOnlySpan<byte> source,
         out int bytesConsumed) =>
@@ -173,6 +208,11 @@ public sealed class MessageIngressStateMachine : IDisposable
         }
     }
 
+    /// <summary>Declares no more input and checks that ingress ended exactly at a frame boundary.</summary>
+    /// <returns>Done for a clean boundary or repeated clean completion; InvalidData for a fault or truncated frame.</returns>
+    /// <remarks>A truncated started payload receives an abort callback; an incomplete header has no started frame to notify. Completion is terminal.</remarks>
+    /// <exception cref="ObjectDisposedException">Ingress has been disposed.</exception>
+    /// <exception cref="InvalidOperationException">The call re-enters ingress from processing or a callback.</exception>
     public OperationStatus CompleteEndOfInput()
     {
         ObjectDisposedException.ThrowIf(_isDisposed, this);
@@ -212,6 +252,9 @@ public sealed class MessageIngressStateMachine : IDisposable
         return OperationStatus.Done;
     }
 
+    /// <summary>Releases validation resources without issuing completion or abort callbacks.</summary>
+    /// <remarks>Call CompleteEndOfInput first when truncation must be reported to the sink. Repeated disposal is harmless.</remarks>
+    /// <exception cref="InvalidOperationException">The call re-enters ingress from processing or a callback.</exception>
     public void Dispose()
     {
         ThrowIfCalledFromSinkCallback("Message ingress cannot be disposed from a sink callback.");

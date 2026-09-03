@@ -4,6 +4,7 @@ set -euo pipefail
 
 repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 solution="$repository_root/Staffetta.Core.slnx"
+cd "$repository_root"
 
 dotnet restore "$solution"
 dotnet build "$solution" --configuration Release --no-restore
@@ -13,3 +14,5 @@ dotnet test "$solution" --configuration Release --no-build --no-restore \
 dotnet test "$repository_root/tests/Staffetta.Core.Tests/Staffetta.Core.Tests.csproj" \
   --configuration Release --no-build --no-restore \
   --filter "TestCategory=AllocationEvidence"
+
+"$repository_root/eng/verify-package"

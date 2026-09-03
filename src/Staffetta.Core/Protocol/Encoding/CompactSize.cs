@@ -3,12 +3,21 @@ using System.Buffers.Binary;
 
 namespace Staffetta.Core.Protocol.Encoding;
 
+/// <summary>Reads and writes canonical Bitcoin CompactSize unsigned integers.</summary>
 public static class CompactSize
 {
     private const byte UInt16Prefix = 0xfd;
     private const byte UInt32Prefix = 0xfe;
     private const byte UInt64Prefix = 0xff;
 
+    /// <summary>Reads one minimally encoded integer, leaving trailing bytes unconsumed.</summary>
+    /// <param name="source">Bytes beginning at the integer's prefix.</param>
+    /// <param name="value">The decoded value on success; otherwise zero.</param>
+    /// <param name="bytesConsumed">The encoded length on success; otherwise zero.</param>
+    /// <returns>
+    /// <see cref="OperationStatus.Done"/>, <see cref="OperationStatus.NeedMoreData"/> for an incomplete
+    /// encoding, or <see cref="OperationStatus.InvalidData"/> for a nonminimal encoding.
+    /// </returns>
     public static OperationStatus Read(
         ReadOnlySpan<byte> source,
         out ulong value,
@@ -66,6 +75,11 @@ public static class CompactSize
         return OperationStatus.Done;
     }
 
+    /// <summary>Writes the shortest encoding, without changing an undersized destination.</summary>
+    /// <param name="value">The unsigned value to encode.</param>
+    /// <param name="destination">Storage for the 1, 3, 5, or 9 encoded bytes; trailing bytes are untouched.</param>
+    /// <param name="bytesWritten">The encoded length on success; otherwise zero.</param>
+    /// <returns><see cref="OperationStatus.Done"/> or <see cref="OperationStatus.DestinationTooSmall"/>.</returns>
     public static OperationStatus Write(
         ulong value,
         Span<byte> destination,

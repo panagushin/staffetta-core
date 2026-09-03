@@ -9,9 +9,11 @@ namespace Staffetta.Core.Protocol.Relay;
 /// <remarks>
 /// Send outputs are intents. Their corresponding committed inputs are the only events that
 /// publish wire-write facts. A peer inventory is an observation, never proof of relay.
+/// Instances are single-consumer and not thread-safe. Output spans are caller-owned and never retained.
 /// </remarks>
 public sealed class BsvTransactionBroadcastStateMachine
 {
+    /// <summary>The maximum number of outputs produced by a single transition.</summary>
     public const int MaximumOutputCount = 3;
 
     private Hash256 _targetTransactionId;
@@ -19,22 +21,35 @@ public sealed class BsvTransactionBroadcastStateMachine
     private bool _hasDeferredGetData;
     private bool _hasDeferredReject;
 
+    /// <summary>Gets the current one-peer advertisement phase.</summary>
     public BsvTransactionBroadcastState State { get; private set; }
 
+    /// <summary>Gets the stable terminal reason, or None before termination.</summary>
     public BsvTransactionBroadcastTerminalReason TerminalReason { get; private set; }
 
+    /// <summary>Gets the transaction selected by Start, or the default hash before start.</summary>
     public Hash256 TargetTransactionId => _targetTransactionId;
 
+    /// <summary>Gets whether the target inventory frame write was committed.</summary>
     public bool IsAnnounced { get; private set; }
 
+    /// <summary>Gets whether a matching peer request was accepted after inventory commitment; an earlier racing request is deferred.</summary>
     public bool WasRequestedByPeer { get; private set; }
 
+    /// <summary>Gets whether the complete transaction frame write was committed; peer acceptance is not implied.</summary>
     public bool IsSentToPeer { get; private set; }
 
+    /// <summary>Gets whether the peer advertised the target; this is independent of sending and does not prove onward relay.</summary>
     public bool WasObservedFromPeer { get; private set; }
 
+    /// <summary>Gets whether a validated correlated reject was accepted after transaction write commitment.</summary>
     public bool IsRejected { get; private set; }
 
+    /// <summary>Selects the target once and emits its inventory send intent.</summary>
+    /// <param name="transactionId">The target transaction identifier; no transaction bytes are retained.</param>
+    /// <param name="destination">Caller-owned output storage; not retained.</param>
+    /// <param name="outputsWritten">One on success; otherwise zero.</param>
+    /// <returns>Done, InvalidData if already started, or DestinationTooSmall if no output slot is available. Non-success changes neither state nor destination.</returns>
     public OperationStatus Start(
         Hash256 transactionId,
         Span<BsvTransactionBroadcastOutput> destination,
@@ -61,6 +76,12 @@ public sealed class BsvTransactionBroadcastStateMachine
         return OperationStatus.Done;
     }
 
+    /// <summary>Applies one validated peer event, committed-write fact, or caller-reported failure and emits its outputs atomically.</summary>
+    /// <param name="input">The event to process; the caller must validate peer data before constructing it.</param>
+    /// <param name="destination">Caller-owned output storage; not retained. BsvTransactionBroadcastStateMachine.MaximumOutputCount slots suffice.</param>
+    /// <param name="outputsWritten">The emitted output count, or zero if no output is produced or the call fails.</param>
+    /// <returns>Done for an accepted or ignored event; InvalidData for invalid call state or input; DestinationTooSmall without state or destination changes so the same event can be retried.</returns>
+    /// <remarks>Terminal state ignores all further inputs and returns Done. Requests racing inventory commitment and rejects racing transaction commitment are deferred until the matching commitment.</remarks>
     public OperationStatus Apply(
         BsvTransactionBroadcastInput input,
         Span<BsvTransactionBroadcastOutput> destination,

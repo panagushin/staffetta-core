@@ -3,8 +3,11 @@ using System.Buffers.Binary;
 
 namespace Staffetta.Core.Protocol.Wire;
 
+/// <summary>A copied, zero-padded wire command of up to twelve printable ASCII bytes.</summary>
+/// <remarks>The default value represents an empty command. Inbound parsing permits it; outbound creation does not.</remarks>
 public readonly struct MessageCommand : IEquatable<MessageCommand>
 {
+    /// <summary>The fixed wire field width and maximum unpadded command length, in bytes.</summary>
     public const int MaximumLength = 12;
 
     private readonly ulong _firstEightBytes;
@@ -16,6 +19,7 @@ public readonly struct MessageCommand : IEquatable<MessageCommand>
         _lastFourBytes = lastFourBytes;
     }
 
+    /// <summary>Gets the number of command bytes before the first padding zero.</summary>
     public int Length
     {
         get
@@ -32,6 +36,10 @@ public readonly struct MessageCommand : IEquatable<MessageCommand>
         }
     }
 
+    /// <summary>Copies a nonempty, unpadded printable ASCII command into a value.</summary>
+    /// <param name="value">One to twelve bytes in the inclusive range 0x20 through 0x7e; not retained.</param>
+    /// <param name="command">The copied command on success; otherwise the default value.</param>
+    /// <returns>Done for a valid command; InvalidData for an invalid length or byte.</returns>
     public static OperationStatus TryCreate(ReadOnlySpan<byte> value, out MessageCommand command)
     {
         command = default;
@@ -50,6 +58,10 @@ public readonly struct MessageCommand : IEquatable<MessageCommand>
         return OperationStatus.Done;
     }
 
+    /// <summary>Copies the command without wire padding into caller-owned storage.</summary>
+    /// <param name="destination">Storage for at least <see cref="Length"/> bytes.</param>
+    /// <param name="bytesWritten">The command length on success; otherwise zero.</param>
+    /// <returns>Done, or DestinationTooSmall without modifying the destination.</returns>
     public OperationStatus TryCopyTo(Span<byte> destination, out int bytesWritten)
     {
         bytesWritten = 0;
@@ -69,6 +81,7 @@ public readonly struct MessageCommand : IEquatable<MessageCommand>
         return OperationStatus.Done;
     }
 
+    /// <summary>Tests byte-for-byte equality with an unpadded command, including its length.</summary>
     public bool Equals(ReadOnlySpan<byte> value)
     {
         if (value.Length != Length)
@@ -87,15 +100,20 @@ public readonly struct MessageCommand : IEquatable<MessageCommand>
         return true;
     }
 
+    /// <summary>Tests equality of all stored command and padding bytes.</summary>
     public bool Equals(MessageCommand other) =>
         _firstEightBytes == other._firstEightBytes && _lastFourBytes == other._lastFourBytes;
 
+    /// <inheritdoc/>
     public override bool Equals(object? obj) => obj is MessageCommand other && Equals(other);
 
+    /// <inheritdoc/>
     public override int GetHashCode() => HashCode.Combine(_firstEightBytes, _lastFourBytes);
 
+    /// <summary>Tests equality of two wire commands.</summary>
     public static bool operator ==(MessageCommand left, MessageCommand right) => left.Equals(right);
 
+    /// <summary>Tests inequality of two wire commands.</summary>
     public static bool operator !=(MessageCommand left, MessageCommand right) => !left.Equals(right);
 
     internal static OperationStatus TryReadPadded(ReadOnlySpan<byte> source, out MessageCommand command)

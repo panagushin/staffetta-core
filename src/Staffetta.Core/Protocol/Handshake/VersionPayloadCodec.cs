@@ -4,13 +4,19 @@ using Staffetta.Core.Protocol.Encoding;
 
 namespace Staffetta.Core.Protocol.Handshake;
 
+/// <summary>Parses a complete bounded version payload and writes the current full-field form without retaining buffers.</summary>
 public static class VersionPayloadCodec
 {
+    /// <summary>The protocol version advertised by the current BSV implementation.</summary>
     public const int CurrentProtocolVersion = 70_016;
+    /// <summary>The maximum user-agent length in bytes, excluding its CompactSize prefix.</summary>
     public const int MaximumUserAgentLength = 256;
+    /// <summary>The maximum association identifier length in bytes, excluding its CompactSize prefix.</summary>
     public const int MaximumAssociationIdLength = 129;
+    /// <summary>The mandatory prefix length through the receiving network address, in bytes.</summary>
     public const int RequiredPrefixLength =
         sizeof(int) + sizeof(ulong) + sizeof(long) + NetworkAddressCodec.EncodedLength;
+    /// <summary>The maximum encoded payload length supported by the bounded fields.</summary>
     public const int MaximumPayloadLength =
         RequiredPrefixLength +
         NetworkAddressCodec.EncodedLength +
@@ -26,6 +32,12 @@ public static class VersionPayloadCodec
     private const int MaximumBoundedUserAgentPrefixLength = 3;
     private const int MaximumBoundedAssociationIdPrefixLength = 1;
 
+    /// <summary>Parses one complete version payload, accepting an absent optional tail only at complete field boundaries.</summary>
+    /// <param name="source">The complete payload, not an arbitrary streaming chunk; returned spans borrow this storage.</param>
+    /// <param name="payload">The parsed view on success; otherwise default.</param>
+    /// <param name="bytesConsumed">The full source length on success; otherwise zero.</param>
+    /// <returns>Done, NeedMoreData for an incomplete field, or InvalidData for noncanonical lengths, oversized fields, invalid relay values, or trailing bytes.</returns>
+    /// <remarks>Done at an optional-field boundary does not prove the enclosing frame is complete. Preserve field presence and validate framing before publishing peer facts.</remarks>
     public static OperationStatus TryParse(
         ReadOnlySpan<byte> source,
         out VersionPayload payload,
@@ -243,6 +255,11 @@ public static class VersionPayloadCodec
         return OperationStatus.Done;
     }
 
+    /// <summary>Writes the full version form through Relay, optionally including an association identifier.</summary>
+    /// <param name="destination">Caller-owned output storage.</param>
+    /// <param name="payload">A view whose source, user-agent, height, and relay fields must all be present.</param>
+    /// <param name="bytesWritten">The encoded payload length on success; otherwise zero.</param>
+    /// <returns>Done, InvalidData for missing required outgoing fields or exceeded bounds, or DestinationTooSmall. Non-success leaves the destination unchanged.</returns>
     public static OperationStatus TryWrite(
         Span<byte> destination,
         VersionPayload payload,

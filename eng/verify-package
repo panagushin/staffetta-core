@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repository_root"
+package_workspace="$(mktemp -d "${TMPDIR:-/tmp}/staffetta-package.XXXXXX")"
+trap 'rm -rf -- "$package_workspace"' EXIT
+
+dotnet pack "$repository_root/Staffetta.Core.slnx" \
+  --configuration Release --no-build --no-restore \
+  -p:PackageVersion=0.0.0-smoke --output "$package_workspace/feed"
+
+mkdir "$package_workspace/consumer"
+cp "$repository_root/eng/PackageSmoke/PackageSmoke.csproj" \
+  "$repository_root/eng/PackageSmoke/Program.cs" "$package_workspace/consumer/"
+smoke_project="$package_workspace/consumer/PackageSmoke.csproj"
+dotnet restore "$smoke_project" --source "$package_workspace/feed" \
+  --packages "$package_workspace/packages"
+dotnet run --project "$smoke_project" --configuration Release --no-restore -- \
+  "$package_workspace/feed/Staffetta.Core.0.0.0-smoke.nupkg" \
+  "$(git -C "$repository_root" rev-parse HEAD)"

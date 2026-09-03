@@ -10,6 +10,8 @@ namespace Staffetta.Core.Protocol.Messages;
 /// Instances are single-consumer and not thread-safe. A full destination stops consumption before
 /// any byte of the next vector. Reset establishes the exact enclosing payload length and clears a
 /// prior successful parse; malformed input and incomplete completion remain faulted until reset.
+/// Output vectors are copied values but remain provisional until the enclosing frame is validated;
+/// this parser checks count/length consistency, not checksums or the meaning of inventory types.
 /// </remarks>
 public sealed class IncrementalInventoryPayloadParser
 {
@@ -23,11 +25,14 @@ public sealed class IncrementalInventoryPayloadParser
     private int _countLength;
     private int _scratchLength;
 
+    /// <summary>Gets the declared vector count after a canonical, length-consistent prefix; zero before then.</summary>
     public ulong VectorCount => _vectorCount;
 
+    /// <summary>Gets the number of complete vectors emitted since the last reset.</summary>
     public ulong VectorsRead => _vectorsRead;
 
     /// <summary>Begins a payload whose exact byte length is supplied by the enclosing frame.</summary>
+    /// <param name="declaredPayloadLength">The exact payload length in bytes, including the count prefix.</param>
     public void Reset(ulong declaredPayloadLength)
     {
         _scratch.AsSpan(0, _scratchLength).Clear();
@@ -41,6 +46,20 @@ public sealed class IncrementalInventoryPayloadParser
     }
 
     /// <summary>Consumes payload bytes until input, output capacity, or the exact payload ends.</summary>
+    /// <param name="source">The next input chunk; any bytes after the complete payload are unconsumed.</param>
+    /// <param name="destination">Caller-owned storage for complete vectors produced by this call.</param>
+    /// <param name="bytesConsumed">Bytes accepted from this chunk, including buffered partial fields.</param>
+    /// <param name="vectorsWritten">Complete vectors written by this call, including on a partial result.</param>
+    /// <returns>
+    /// <see cref="OperationStatus.Done"/> when the payload is complete;
+    /// <see cref="OperationStatus.NeedMoreData"/> when a field is incomplete;
+    /// <see cref="OperationStatus.DestinationTooSmall"/> when output is full; or
+    /// <see cref="OperationStatus.InvalidData"/> before reset, after a fault, or for an invalid count/length.
+    /// </returns>
+    /// <remarks>
+    /// Resume partial results with the unconsumed source suffix and fresh output capacity. A completed
+    /// parser returns Done without consuming further bytes until reset. Source spans are not retained.
+    /// </remarks>
     public OperationStatus Consume(
         ReadOnlySpan<byte> source,
         Span<InventoryVector> destination,
@@ -121,6 +140,7 @@ public sealed class IncrementalInventoryPayloadParser
     }
 
     /// <summary>Marks the enclosing payload complete and rejects truncation.</summary>
+    /// <returns><see cref="OperationStatus.Done"/> if already complete; otherwise faults the parser and returns <see cref="OperationStatus.InvalidData"/>.</returns>
     public OperationStatus Complete()
     {
         if (_state == ParseState.Completed)

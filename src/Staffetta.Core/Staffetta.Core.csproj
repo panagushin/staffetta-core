@@ -1,4 +1,21 @@
 <Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <IsPackable>true</IsPackable>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <WarningsAsErrors>$(WarningsAsErrors);CS1591</WarningsAsErrors>
+    <Version>0.0.0-dev</Version>
+    <Authors>Oleg Panagushin</Authors>
+    <Description>Streaming Bitcoin-family protocol primitives and BSV state machines for .NET. Pre-release API; no full-node consensus validation or production runtime.</Description>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageProjectUrl>https://github.com/panagushin/staffetta-core</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/panagushin/staffetta-core</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+  </PropertyGroup>
+  <ItemGroup>
+    <None Include="../../README.md" Pack="true" PackagePath="/" />
+    <None Include="../../LICENSE" Pack="true" PackagePath="/" />
+  </ItemGroup>
   <ItemGroup>
     <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleToAttribute">
       <_Parameter1>Staffetta.Core.Tests</_Parameter1>

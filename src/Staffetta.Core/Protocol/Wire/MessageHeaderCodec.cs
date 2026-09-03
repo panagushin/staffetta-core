@@ -3,10 +3,14 @@ using System.Buffers.Binary;
 
 namespace Staffetta.Core.Protocol.Wire;
 
+/// <summary>Parses and writes basic and extended headers without retaining caller buffers.</summary>
 public static class MessageHeaderCodec
 {
+    /// <summary>The number of network-magic bytes at the beginning of either header format.</summary>
     public const int NetworkMagicLength = 4;
+    /// <summary>The encoded basic header length in bytes.</summary>
     public const int BasicHeaderLength = 24;
+    /// <summary>The encoded extended header length in bytes, including its outer header.</summary>
     public const int ExtendedHeaderLength = 44;
 
     private const int CommandOffset = NetworkMagicLength;
@@ -15,8 +19,17 @@ public static class MessageHeaderCodec
     private const int ExtendedCommandOffset = BasicHeaderLength;
     private const int ExtendedPayloadLengthOffset = ExtendedCommandOffset + MessageCommand.MaximumLength;
 
+    /// <summary>Gets the unpadded outer command that marks an extended header.</summary>
     public static ReadOnlySpan<byte> ExtendedCommand => "extmsg"u8;
 
+    /// <summary>Parses one header prefix and checks network magic, padding, sentinel fields, and the caller's length bound.</summary>
+    /// <param name="source">Caller-owned bytes starting at a header; payload bytes are not examined or retained.</param>
+    /// <param name="expectedNetworkMagic">Exactly four expected network-magic bytes.</param>
+    /// <param name="maximumPayloadLength">The inclusive accepted payload-length bound.</param>
+    /// <param name="header">A copied descriptor on success; otherwise default.</param>
+    /// <param name="bytesConsumed">The header length on success; otherwise zero.</param>
+    /// <returns>Done, NeedMoreData for an incomplete header, or InvalidData for a rejected header or magic argument.</returns>
+    /// <remarks>Inbound compatibility permits empty commands and extended lengths at or below the basic limit. Successful parsing does not validate a payload or guarantee that the descriptor is valid for outbound writing.</remarks>
     public static OperationStatus TryParse(
         ReadOnlySpan<byte> source,
         ReadOnlySpan<byte> expectedNetworkMagic,
@@ -98,6 +111,14 @@ public static class MessageHeaderCodec
         return OperationStatus.Done;
     }
 
+    /// <summary>Writes one outbound header after validating the descriptor and destination capacity.</summary>
+    /// <param name="destination">Caller-owned storage for the encoded header.</param>
+    /// <param name="networkMagic">Exactly four network-magic bytes; not retained.</param>
+    /// <param name="header">A basic or extended outbound descriptor; no payload is read.</param>
+    /// <param name="maximumPayloadLength">The inclusive permitted payload-length bound.</param>
+    /// <param name="bytesWritten">The encoded header length on success; otherwise zero.</param>
+    /// <returns>Done, InvalidData for invalid arguments, or DestinationTooSmall. Non-success leaves the destination unchanged.</returns>
+    /// <remarks>Commands must be nonempty. Basic headers cannot use extmsg; extended lengths must exceed the basic 32-bit limit and carry a zero checksum.</remarks>
     public static OperationStatus TryWrite(
         Span<byte> destination,
         ReadOnlySpan<byte> networkMagic,

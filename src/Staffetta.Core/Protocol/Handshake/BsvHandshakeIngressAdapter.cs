@@ -16,6 +16,7 @@ public sealed class BsvHandshakeIngressAdapter :
     IMessageIngressAdmissionPolicy,
     IDisposable
 {
+    /// <summary>The maximum byte count staged for bounded control payloads; protoconf is parsed incrementally.</summary>
     public const int MaximumStagedPayloadLength = BsvHandshakeFrameProcessor.MaximumStagedPayloadLength;
 
     private readonly BsvHandshakeFrameProcessor _processor;
@@ -24,6 +25,12 @@ public sealed class BsvHandshakeIngressAdapter :
     private bool _isCompleted;
     private bool _isDisposed;
 
+    /// <summary>Creates bounded handshake ingress using caller-selected network, size, and version limits.</summary>
+    /// <param name="expectedNetworkMagic">Exactly four magic bytes, copied during construction.</param>
+    /// <param name="maximumPayloadLength">The inclusive frame payload-length limit, including unknown commands.</param>
+    /// <param name="minimumPeerProtocolVersion">A positive minimum acceptable peer version.</param>
+    /// <exception cref="ArgumentException">Network magic does not contain exactly four bytes.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">The minimum peer version is not positive.</exception>
     public BsvHandshakeIngressAdapter(
         ReadOnlySpan<byte> expectedNetworkMagic,
         ulong maximumPayloadLength,
@@ -37,10 +44,17 @@ public sealed class BsvHandshakeIngressAdapter :
             this);
     }
 
+    /// <summary>Gets the adapter-owned handshake state machine for inspecting accepted protocol state.</summary>
+    /// <remarks>Direct transitions bypass the adapter's output queue; the caller must coordinate them with adapter use.</remarks>
     public BsvHandshakeStateMachine Handshake => _processor.Handshake;
 
+    /// <summary>Gets the queued output count that must be drained before consuming more input.</summary>
     public int PendingOutputCount => _processor.PendingOutputCount;
 
+    /// <summary>Starts negotiation and queues the local version send intent.</summary>
+    /// <param name="localNonce">The caller-generated nonce used for self-connection detection.</param>
+    /// <returns>Done on successful start, DestinationTooSmall while outputs remain queued, or InvalidData when start is no longer permitted.</returns>
+    /// <exception cref="ObjectDisposedException">The adapter has been disposed.</exception>
     public OperationStatus Start(ulong localNonce)
     {
         ObjectDisposedException.ThrowIf(_isDisposed, this);
@@ -55,6 +69,11 @@ public sealed class BsvHandshakeIngressAdapter :
     }
 
     /// <summary>Consumes at most one complete wire frame.</summary>
+    /// <param name="source">Caller-owned bytes; bounded control bytes may be copied, but no source span is retained.</param>
+    /// <param name="bytesConsumed">Bytes accepted from this call, including bytes accepted before a failure; following frames are untouched.</param>
+    /// <returns>Done after one frame, NeedMoreData for an incomplete frame, DestinationTooSmall with zero consumption while outputs await draining, or InvalidData when unusable or not started.</returns>
+    /// <remarks>Malformed framing or control payloads permanently prevent further consumption. A completed frame can also cause a terminal handshake transition; inspect Handshake.State. Send outputs are intents, not committed writes.</remarks>
+    /// <exception cref="ObjectDisposedException">The adapter has been disposed.</exception>
     public OperationStatus Consume(ReadOnlySpan<byte> source, out int bytesConsumed)
     {
         ObjectDisposedException.ThrowIf(_isDisposed, this);
@@ -103,6 +122,10 @@ public sealed class BsvHandshakeIngressAdapter :
     }
 
     /// <summary>Copies all pending outputs atomically into caller-owned storage.</summary>
+    /// <param name="destination">Storage for the entire pending output queue; not retained.</param>
+    /// <param name="outputsWritten">The number drained on success; otherwise zero.</param>
+    /// <returns>Done after draining, including an empty queue, or DestinationTooSmall without changing the queue or destination.</returns>
+    /// <exception cref="ObjectDisposedException">The adapter has been disposed.</exception>
     public OperationStatus DrainOutputs(
         Span<BsvHandshakeOutput> destination,
         out int outputsWritten)
@@ -111,6 +134,10 @@ public sealed class BsvHandshakeIngressAdapter :
         return _processor.DrainOutputs(destination, out outputsWritten);
     }
 
+    /// <summary>Declares end of input and checks for an incomplete header or payload without implying handshake readiness.</summary>
+    /// <returns>Done at a clean frame boundary, including repeated clean completion; InvalidData for truncation or unusable ingress.</returns>
+    /// <remarks>Successful completion prevents future consumption but leaves queued outputs available to drain.</remarks>
+    /// <exception cref="ObjectDisposedException">The adapter has been disposed.</exception>
     public OperationStatus CompleteEndOfInput()
     {
         ObjectDisposedException.ThrowIf(_isDisposed, this);
@@ -153,6 +180,7 @@ public sealed class BsvHandshakeIngressAdapter :
         return status;
     }
 
+    /// <summary>Releases parser and framing resources without reporting end of input; repeated disposal is harmless.</summary>
     public void Dispose()
     {
         if (_isDisposed)

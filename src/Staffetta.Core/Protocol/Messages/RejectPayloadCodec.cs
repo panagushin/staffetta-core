@@ -10,12 +10,29 @@ namespace Staffetta.Core.Protocol.Messages;
 /// </summary>
 public static class RejectPayloadCodec
 {
+    /// <summary>The profile's maximum raw command length in bytes.</summary>
     public const int MaximumCommandLength = 12;
+    /// <summary>The profile's maximum raw reason length in bytes.</summary>
     public const int MaximumReasonLength = 111;
+    /// <summary>The profile's maximum command-specific data length in bytes.</summary>
     public const int MaximumDataLength = Hash256.Length;
+    /// <summary>The largest encoded payload permitted by this profile.</summary>
     public const int MaximumPayloadLength =
         1 + MaximumCommandLength + sizeof(byte) + 1 + MaximumReasonLength + MaximumDataLength;
 
+    /// <summary>Parses a whole payload as borrowed raw fields under the bounded interoperability profile.</summary>
+    /// <param name="source">The complete payload storage, which must remain stable while the returned view is used.</param>
+    /// <param name="payload">A view borrowing from the source on success; otherwise the default value.</param>
+    /// <param name="bytesConsumed">The full source length on success; otherwise zero.</param>
+    /// <returns>
+    /// <see cref="OperationStatus.Done"/>, <see cref="OperationStatus.NeedMoreData"/> for truncated fields
+    /// or object hashes, or <see cref="OperationStatus.InvalidData"/> for noncanonical lengths or profile violations.
+    /// </returns>
+    /// <remarks>
+    /// Exact lowercase tx and block commands require 32 data bytes; version requires none. Other
+    /// commands accept up to 32 bytes, including none, so their payload boundary must be supplied
+    /// by the caller. Command, reason, and code contents are otherwise uninterpreted.
+    /// </remarks>
     public static OperationStatus TryParse(
         ReadOnlySpan<byte> source,
         out RejectPayload payload,
@@ -68,6 +85,17 @@ public static class RejectPayloadCodec
         return OperationStatus.Done;
     }
 
+    /// <summary>Writes raw fields with canonical lengths, leaving the destination unchanged on failure.</summary>
+    /// <param name="destination">Output storage; bytes beyond the encoded payload are untouched.</param>
+    /// <param name="command">Raw command bytes, at most <see cref="MaximumCommandLength"/> bytes.</param>
+    /// <param name="code">The raw rejection code.</param>
+    /// <param name="reason">Raw reason bytes, at most <see cref="MaximumReasonLength"/> bytes.</param>
+    /// <param name="data">32 bytes for tx/block, none for version, or up to 32 for other commands.</param>
+    /// <param name="bytesWritten">The encoded payload length on success; otherwise zero.</param>
+    /// <returns>
+    /// <see cref="OperationStatus.Done"/>, <see cref="OperationStatus.InvalidData"/> for profile violations,
+    /// or <see cref="OperationStatus.DestinationTooSmall"/> for insufficient storage.
+    /// </returns>
     public static OperationStatus TryWrite(
         Span<byte> destination,
         ReadOnlySpan<byte> command,

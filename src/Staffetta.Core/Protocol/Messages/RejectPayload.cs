@@ -23,6 +23,7 @@ public readonly ref struct RejectPayload
     /// <summary>Gets the borrowed raw command bytes.</summary>
     public ReadOnlySpan<byte> Command { get; }
 
+    /// <summary>Gets the peer's raw rejection code without interpreting or validating it.</summary>
     public byte Code { get; }
 
     /// <summary>Gets the borrowed raw reason bytes.</summary>
@@ -31,6 +32,9 @@ public readonly ref struct RejectPayload
     /// <summary>Gets the borrowed command-specific data bytes.</summary>
     public ReadOnlySpan<byte> Data { get; }
 
+    /// <summary>Copies the object hash for an exact lowercase tx or block command with 32 data bytes.</summary>
+    /// <param name="hash">The wire-order object identifier on success; otherwise the default value.</param>
+    /// <returns>Whether the command and data have the supported object-hash shape.</returns>
     public bool TryGetObjectHash(out Hash256 hash)
     {
         hash = default;

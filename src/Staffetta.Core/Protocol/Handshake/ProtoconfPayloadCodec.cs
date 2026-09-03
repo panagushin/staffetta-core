@@ -4,11 +4,20 @@ using Staffetta.Core.Protocol.Encoding;
 
 namespace Staffetta.Core.Protocol.Handshake;
 
+/// <summary>Parses bounded protoconf payloads and writes one- or two-field advertisements.</summary>
 public static class ProtoconfPayloadCodec
 {
+    /// <summary>The inclusive maximum complete protoconf payload length in bytes.</summary>
     public const int MaximumPayloadLength = 1_048_576;
+    /// <summary>The maximum stream-policy byte length, excluding its CompactSize prefix.</summary>
     public const int MaximumStreamPoliciesLength = 650;
 
+    /// <summary>Parses one complete protoconf payload without copying policy or future-field bytes.</summary>
+    /// <param name="source">The complete payload; returned spans borrow this storage.</param>
+    /// <param name="payload">The parsed view on success; otherwise default.</param>
+    /// <param name="bytesConsumed">The source length on success; otherwise zero.</param>
+    /// <returns>Done, NeedMoreData for incomplete known fields, or InvalidData for invalid counts, noncanonical lengths, exceeded bounds, or unexpected known-field trailing bytes.</returns>
+    /// <remarks>Counts above two expose trailing bytes opaquely without validating future-field structure. This codec does not enforce the handshake receive-limit minimum.</remarks>
     public static OperationStatus TryParse(
         ReadOnlySpan<byte> source,
         out ProtoconfPayload payload,
@@ -79,6 +88,13 @@ public static class ProtoconfPayloadCodec
         return OperationStatus.Done;
     }
 
+    /// <summary>Writes the receive limit and an optional bounded policy field using canonical CompactSize lengths.</summary>
+    /// <param name="destination">Caller-owned output storage.</param>
+    /// <param name="maximumReceivePayloadLength">The advertised limit in bytes; no handshake-policy minimum is enforced here.</param>
+    /// <param name="streamPolicies">Caller-owned unprefixed policy bytes; not retained.</param>
+    /// <param name="includeStreamPolicies">Whether to emit a second field, including an empty policy field.</param>
+    /// <param name="bytesWritten">The encoded length on success; otherwise zero.</param>
+    /// <returns>Done, InvalidData for oversized or excluded nonempty policies, or DestinationTooSmall. Non-success leaves the destination unchanged.</returns>
     public static OperationStatus TryWrite(
         Span<byte> destination,
         uint maximumReceivePayloadLength,

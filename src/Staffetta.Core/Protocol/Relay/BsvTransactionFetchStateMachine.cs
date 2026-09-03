@@ -9,21 +9,29 @@ namespace Staffetta.Core.Protocol.Relay;
 /// <remarks>
 /// The caller supplies only structurally and frame-validated transaction identifiers. A send
 /// output becomes a request fact only after the matching write-committed input is applied.
+/// Instances are single-consumer and not thread-safe. Output spans are caller-owned and never retained.
 /// </remarks>
 public sealed class BsvTransactionFetchStateMachine
 {
+    /// <summary>The maximum number of outputs produced by a single transition.</summary>
     public const int MaximumOutputCount = 2;
 
     private Hash256 _targetTransactionId;
     private bool _hasTarget;
     private bool _hasDeferredNotFound;
 
+    /// <summary>Gets the current fetch phase, including terminal Received and NotFound outcomes.</summary>
     public BsvTransactionFetchState State { get; private set; }
 
+    /// <summary>Gets the failure reason, or None for an active fetch or a Received/NotFound outcome.</summary>
     public BsvTransactionFetchTerminalReason TerminalReason { get; private set; }
 
+    /// <summary>Gets the transaction selected by Start, or the default hash before start.</summary>
     public Hash256 TargetTransactionId => _targetTransactionId;
 
+    /// <summary>Selects the target and begins waiting for its inventory; emits no request by itself.</summary>
+    /// <param name="transactionId">The target identifier; no transaction bytes are retained.</param>
+    /// <returns>Done on the first start; InvalidData if already started. No automatic restart or retry is performed.</returns>
     public OperationStatus Start(Hash256 transactionId)
     {
         if (State != BsvTransactionFetchState.Created)
@@ -37,6 +45,12 @@ public sealed class BsvTransactionFetchStateMachine
         return OperationStatus.Done;
     }
 
+    /// <summary>Applies one validated peer event, committed-write fact, or caller-reported failure and emits its outputs atomically.</summary>
+    /// <param name="input">The event to process; the caller must validate peer data before constructing it.</param>
+    /// <param name="destination">Caller-owned output storage; not retained. BsvTransactionFetchStateMachine.MaximumOutputCount slots suffice.</param>
+    /// <param name="outputsWritten">The emitted output count, or zero if no output is produced or the call fails.</param>
+    /// <returns>Done for an accepted or ignored event; InvalidData for invalid call state or input; DestinationTooSmall without state or destination changes so the same event can be retried.</returns>
+    /// <remarks>Received, NotFound, and Terminal states ignore all further inputs and return Done. A matching validated transaction can complete a fetch even before request commitment.</remarks>
     public OperationStatus Apply(
         BsvTransactionFetchInput input,
         Span<BsvTransactionFetchOutput> destination,

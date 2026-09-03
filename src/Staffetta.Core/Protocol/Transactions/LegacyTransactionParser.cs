@@ -7,14 +7,18 @@ using Staffetta.Core.Protocol.Encoding;
 namespace Staffetta.Core.Protocol.Transactions;
 
 /// <summary>
-/// Incrementally validates one canonical non-witness transaction without retaining scripts or
+/// Incrementally parses one structurally canonical non-witness transaction without retaining scripts or
 /// allocating from declared counts and lengths.
 /// </summary>
 /// <remarks>
 /// Instances are single-consumer and not thread-safe. Sink callbacks are provisional until
-/// <see cref="Commit"/> succeeds. Malformed input, callback exceptions, and callback reentrancy
+/// <see cref="Commit(out LegacyTransactionSummary)"/> succeeds. Malformed input, callback exceptions, and callback reentrancy
 /// permanently fault the instance. After a successful commit or explicit <see cref="Abort"/>, the
 /// instance is reset for another transaction.
+/// Canonical CompactSize encodings and nonzero input/output counts are required, but script bytes
+/// are opaque and all signed output values are preserved. Monetary ranges, script execution,
+/// UTXO availability, transaction finality, and consensus validity are outside this parser.
+/// Enclosing-frame length and checksum validation remain the caller's responsibility before commit.
 /// </remarks>
 public sealed class LegacyTransactionParser : IDisposable
 {
@@ -47,6 +51,8 @@ public sealed class LegacyTransactionParser : IDisposable
     private bool _isDisposed;
 
     /// <summary>Creates a reusable parser that reports provisional structure to the sink.</summary>
+    /// <param name="sink">The synchronous sink receiving borrowed script chunks and provisional callbacks.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="sink"/> is null.</exception>
     public LegacyTransactionParser(ILegacyTransactionSink sink)
         : this(sink, LegacyTransactionHashMode.Internal)
     {
@@ -70,11 +76,28 @@ public sealed class LegacyTransactionParser : IDisposable
         _state = ParseState.Version;
     }
 
+    /// <summary>Gets whether all transaction fields have been consumed and await an explicit commit.</summary>
+    /// <remarks>This reports parse position only; a fault or disposal still prevents commit.</remarks>
     public bool IsReadyToCommit => _state == ParseState.ReadyToCommit;
 
+    /// <summary>Gets whether an unrecoverable parse or callback failure has occurred.</summary>
     public bool IsFaulted => _isFaulted;
 
     /// <summary>Consumes up to one complete transaction and leaves trailing bytes untouched.</summary>
+    /// <param name="source">The next byte chunk; script spans are borrowed only during callbacks.</param>
+    /// <param name="bytesConsumed">Bytes accepted from this call, including incomplete fields and bytes accepted before a callback failure.</param>
+    /// <returns>
+    /// <see cref="OperationStatus.Done"/> when ready to commit,
+    /// <see cref="OperationStatus.NeedMoreData"/> while incomplete, or
+    /// <see cref="OperationStatus.InvalidData"/> for malformed input, length overflow, or a faulted instance.
+    /// </returns>
+    /// <remarks>
+    /// Resume with the unconsumed suffix; accepted bytes are not replayed. Once ready, further calls
+    /// return Done without consumption until commit or abort. Callback exceptions propagate; a
+    /// sink-thrown overflow exception is instead treated as invalid data by the parser.
+    /// </remarks>
+    /// <exception cref="ObjectDisposedException">The parser has been disposed.</exception>
+    /// <exception cref="InvalidOperationException">The parser is re-entered from a sink callback.</exception>
     public OperationStatus Consume(ReadOnlySpan<byte> source, out int bytesConsumed)
     {
         ObjectDisposedException.ThrowIf(_isDisposed, this);
@@ -113,7 +136,16 @@ public sealed class LegacyTransactionParser : IDisposable
         return status;
     }
 
-    /// <summary>Publishes the validated summary and resets after a complete transaction.</summary>
+    /// <summary>Publishes a structurally complete summary and resets for the next transaction.</summary>
+    /// <param name="summary">The computed metadata and transaction identifier on success; not usable if a callback throws.</param>
+    /// <returns><see cref="OperationStatus.Done"/> on commit, or <see cref="OperationStatus.InvalidData"/> if incomplete or faulted.</returns>
+    /// <remarks>
+    /// Call only after any enclosing frame has been validated. Incomplete commit attempts do not
+    /// discard buffered input. The transaction identifier is double SHA-256 of consumed transaction
+    /// bytes only. A commit-callback exception propagates and permanently faults the instance.
+    /// </remarks>
+    /// <exception cref="ObjectDisposedException">The parser has been disposed.</exception>
+    /// <exception cref="InvalidOperationException">The parser is re-entered from a sink callback.</exception>
     public OperationStatus Commit(out LegacyTransactionSummary summary)
     {
         ObjectDisposedException.ThrowIf(_isDisposed, this);
@@ -197,6 +229,9 @@ public sealed class LegacyTransactionParser : IDisposable
     }
 
     /// <summary>Discards an active provisional lifecycle and resets the parser.</summary>
+    /// <remarks>Notifies the sink only if its lifecycle has started. A faulted parser cannot be recovered this way.</remarks>
+    /// <exception cref="ObjectDisposedException">The parser has been disposed.</exception>
+    /// <exception cref="InvalidOperationException">The parser is faulted or is re-entered from a sink callback.</exception>
     public void Abort()
     {
         ObjectDisposedException.ThrowIf(_isDisposed, this);
@@ -226,6 +261,8 @@ public sealed class LegacyTransactionParser : IDisposable
     }
 
     /// <summary>Releases hashing resources without invoking an abort callback.</summary>
+    /// <remarks>Call <see cref="Abort"/> first if a nonfaulted provisional lifecycle needs an abort notification. Repeated disposal is harmless.</remarks>
+    /// <exception cref="InvalidOperationException">Disposal is attempted from a sink callback.</exception>
     public void Dispose()
     {
         if (_isDisposed)
