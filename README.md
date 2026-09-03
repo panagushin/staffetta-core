@@ -12,8 +12,14 @@ part of this repository.
 
 This is pre-release software, not a full node or a production wallet. BTC
 witness transactions and additional network profiles are not implemented.
-Internal transport and header-chain orchestration are not a supported library
-API. No API compatibility or production-readiness commitment is made before
+Internal transport actors and planners are not a supported library API.
+`BsvPeerObservationSession` exposes a bounded sans-IO observation driver:
+caller-owned writes with explicit acknowledgement, validated inventory and
+headers, and streamed transaction callbacks. The caller owns I/O, scheduling,
+staging and recovery. `BsvSelectedHeaderChain` provides contextual header
+admission over explicitly trusted bootstrap history; it does not authenticate
+that initial trust anchor or prove transaction inclusion.
+No API compatibility or production-readiness commitment is made before
 the first release.
 
 ## Build and verify

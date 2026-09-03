@@ -1,5 +1,6 @@
 using System.Buffers;
 using Staffetta.Core.Protocol.Cryptography;
+using Staffetta.Core.Protocol.Blocks;
 using Staffetta.Core.Protocol.Handshake;
 using Staffetta.Core.Protocol.Messages;
 using Staffetta.Core.Protocol.Relay;
@@ -32,6 +33,7 @@ internal sealed class BsvPeerSessionFrameProcessor :
     private readonly IncrementalInventoryPayloadParser _inventoryParser = new();
     private readonly BsvTransactionMonetaryRangeValidator _monetaryValidator;
     private readonly LegacyTransactionParser _transactionParser;
+    private readonly BsvPeerObservationBuffers? _observations;
 
     private FrameRoute _activeRoute;
     private ulong _activePayloadLength;
@@ -47,8 +49,10 @@ internal sealed class BsvPeerSessionFrameProcessor :
 
     internal BsvPeerSessionFrameProcessor(
         int minimumPeerProtocolVersion,
-        ILegacyTransactionSink transactionSink)
+        ILegacyTransactionSink transactionSink,
+        BsvPeerObservationBuffers? observations = null)
     {
+        _observations = observations;
         _handshakeProcessor = new BsvHandshakeFrameProcessor(
             minimumPeerProtocolVersion,
             trackEgressProvenance: true);
@@ -234,6 +238,7 @@ internal sealed class BsvPeerSessionFrameProcessor :
 
     internal void Terminate(BsvPeerSessionTerminationCause cause)
     {
+        _observations?.Discard();
         _handshakeProcessor.DiscardOutputsAndEgressIntents();
         _relay.Terminate(cause);
         _pendingMonetaryValidation = default;
@@ -260,6 +265,9 @@ internal sealed class BsvPeerSessionFrameProcessor :
             FrameRoute.Transaction =>
                 HandshakeState == BsvHandshakeState.Ready &&
                 header.PayloadLength >= MinimumLegacyTransactionPayloadLength,
+            FrameRoute.Headers => HandshakeState == BsvHandshakeState.Ready &&
+                header.PayloadLength is >= 1 &&
+                header.PayloadLength <= (_observations?.MaximumHeaderPayloadLength ?? 0),
             FrameRoute.RelayReject =>
                 header.PayloadLength is >= 3 and <= RejectPayloadCodec.MaximumPayloadLength,
             FrameRoute.EarlyRelay => false,
@@ -305,6 +313,7 @@ internal sealed class BsvPeerSessionFrameProcessor :
             FrameRoute.Inventory or FrameRoute.GetData or FrameRoute.NotFound =>
                 ConsumeInventoryPayload(payload),
             FrameRoute.Transaction => ConsumeTransactionPayload(payload),
+            FrameRoute.Headers => _observations!.StageHeaders(payload),
             FrameRoute.RelayReject => ConsumeRejectPayload(payload),
             _ => OperationStatus.InvalidData,
         };
@@ -363,6 +372,11 @@ internal sealed class BsvPeerSessionFrameProcessor :
             for (var index = 0; index < vectorsWritten; index++)
             {
                 ref readonly var vector = ref _inventoryBatch[index];
+                if (_activeRoute == FrameRoute.Inventory &&
+                    _observations is not null && !_observations.StageInventory(vector))
+                {
+                    return OperationStatus.InvalidData;
+                }
                 if (vector.Type != TransactionInventoryType)
                 {
                     continue;
@@ -444,6 +458,11 @@ internal sealed class BsvPeerSessionFrameProcessor :
                     return OperationStatus.InvalidData;
                 }
 
+                if (_activeRoute == FrameRoute.Inventory)
+                {
+                    _observations?.CommitInventory();
+                }
+
                 return _activeRoute switch
                 {
                     FrameRoute.Inventory => _relay.OnPeerInventory(
@@ -453,6 +472,9 @@ internal sealed class BsvPeerSessionFrameProcessor :
                         _hasMatchingBroadcastInventory),
                     _ => _relay.OnPeerNotFound(_hasMatchingFetchInventory),
                 };
+
+            case FrameRoute.Headers:
+                return _observations!.CommitHeaders();
 
             case FrameRoute.Transaction:
                 if (!_transactionParser.IsReadyToCommit ||
@@ -519,6 +541,7 @@ internal sealed class BsvPeerSessionFrameProcessor :
 
     private void ResetActiveFrame()
     {
+        _observations?.ResetStaging();
         _rejectPayload.AsSpan(0, _rejectPayloadLength).Clear();
         _inventoryBatch.AsSpan().Clear();
         _activeRoute = FrameRoute.None;
@@ -530,8 +553,12 @@ internal sealed class BsvPeerSessionFrameProcessor :
         _hasMatchingFetchInventory = false;
     }
 
-    private static FrameRoute Classify(in MessageCommand command, bool isReady)
+    private FrameRoute Classify(in MessageCommand command, bool isReady)
     {
+        if (_observations is not null && command.Equals("headers"u8))
+        {
+            return isReady ? FrameRoute.Headers : FrameRoute.EarlyRelay;
+        }
         if (command.Equals("inv"u8))
         {
             return isReady ? FrameRoute.Inventory : FrameRoute.EarlyRelay;
@@ -581,5 +608,6 @@ internal sealed class BsvPeerSessionFrameProcessor :
         Transaction,
         RelayReject,
         EarlyRelay,
+        Headers,
     }
 }

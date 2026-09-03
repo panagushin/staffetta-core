@@ -178,6 +178,8 @@ internal sealed class BsvMainnetHeaderChainOwner
 
     internal AdmittedBlockHeader BestTip => _chain.BestTip;
 
+    internal bool IsOnSelectedChain(Hash256 hash) => _chain.IsOnCurrentBestChain(hash);
+
     internal CurrentSelectedChainInclusionResult VerifyCurrentSelectedChainInclusion(
         Hash256 transactionId,
         Hash256 blockHash,

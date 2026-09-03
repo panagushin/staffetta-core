@@ -19,8 +19,8 @@ namespace Staffetta.Core.Protocol.Sessions;
 /// Transaction sink callbacks remain provisional until both the transaction structure and its
 /// enclosing frame are validated.
 /// The transport-write planner and acknowledgements are internal. External library consumers
-/// should use the standalone codecs and state machines rather than treating this adapter as a
-/// complete public session driver.
+/// can use <see cref="BsvPeerObservationSession"/> for a curated observation driver, or standalone
+/// codecs and state machines rather than treating this adapter as a complete public session driver.
 /// </remarks>
 public sealed class BsvPeerSessionIngressAdapter :
     IMessageIngressSink,
@@ -61,12 +61,23 @@ public sealed class BsvPeerSessionIngressAdapter :
         ulong maximumPayloadLength,
         int minimumPeerProtocolVersion,
         ILegacyTransactionSink transactionSink)
+        : this(expectedNetworkMagic, maximumPayloadLength, minimumPeerProtocolVersion, transactionSink, null)
+    {
+    }
+
+    internal BsvPeerSessionIngressAdapter(
+        ReadOnlySpan<byte> expectedNetworkMagic,
+        ulong maximumPayloadLength,
+        int minimumPeerProtocolVersion,
+        ILegacyTransactionSink transactionSink,
+        BsvPeerObservationBuffers? observations)
     {
         _processor = new BsvPeerSessionFrameProcessor(
             minimumPeerProtocolVersion,
             new GuardedTransactionSink(
                 this,
-                transactionSink ?? throw new ArgumentNullException(nameof(transactionSink))));
+                transactionSink ?? throw new ArgumentNullException(nameof(transactionSink))),
+            observations);
         _ingress = new MessageIngressStateMachine(
             expectedNetworkMagic,
             maximumPayloadLength,
@@ -670,6 +681,8 @@ public sealed class BsvPeerSessionIngressAdapter :
             throw new InvalidOperationException("Peer session cannot be re-entered from an ingress callback.");
         }
     }
+
+    internal void RejectCallbackReentry() => ThrowIfUnavailable();
 
     private void ThrowIfCallbackReentered()
     {
