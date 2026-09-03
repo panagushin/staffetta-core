@@ -159,13 +159,13 @@ public sealed class FetchCommandTests
     }
 
     [TestMethod]
-    public async Task ReceiptCommittedDuringApplicationDeadlineQuiescenceIsNotMisclassifiedAsTimeout()
+    public async Task ReceiptCommittedDuringDeadlineQuiescenceIsNotMisclassifiedAsTimeout()
     {
         var transaction = TransactionFixture.CreateMinimal();
         var transactionId = Hash256.DoubleSha256(transaction);
         var connection = new FakePeerConnection(PeerFrames.Ready());
         var deadline = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var output = new BlockingOnContentWriter("fetch.application");
+        var output = new BlockingOnContentWriter("\"fact\":\"Received\"");
         var application = CreateApplication(
             connection,
             output,
@@ -174,10 +174,15 @@ public sealed class FetchCommandTests
         var running = application.RunAsync(CreateArguments(transactionId), CancellationToken.None).AsTask();
         try
         {
-            await output.Blocked.WaitAsync(TimeSpan.FromSeconds(5));
+            await WaitUntilAsync(() => output.ToString().Contains("fetch.application", StringComparison.Ordinal));
             connection.PeerStream.AppendInput(PeerFrames.Transaction(transaction));
+            // Appending input does not prove receipt. Hold delivery of the committed Received fact
+            // so the deadline must quiesce the actor before classifying its final outcome.
+            await output.Blocked.WaitAsync(TimeSpan.FromSeconds(5));
             deadline.SetResult();
             await WaitUntilAsync(() => connection.AbortCount == 1);
+            Assert.IsFalse(running.IsCompleted);
+            Assert.IsFalse(output.ToString().Contains("fetch.terminal", StringComparison.Ordinal));
         }
         finally
         {
@@ -191,6 +196,43 @@ public sealed class FetchCommandTests
         CollectionAssert.Contains(ReadFacts(output), BsvTransactionFetchOutputKind.Received.ToString());
         StringAssert.Contains(Lines(output)[^1], "received_before_request_commit");
         Assert.IsFalse(output.ToString().Contains("\"outcome\":\"timeout\"", StringComparison.Ordinal));
+    }
+
+    [TestMethod]
+    public async Task ApplicationDeadlineBeforeAnyReceiptCommitsRemainsTimeout()
+    {
+        var transactionId = Hash256.DoubleSha256(TransactionFixture.CreateMinimal());
+        var connection = new FakePeerConnection(PeerFrames.Ready());
+        var deadline = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var output = new BlockingOnContentWriter("fetch.application");
+        var application = CreateApplication(
+            connection,
+            output,
+            new TestRuntime(TestRuntime.Infinite, TestRuntime.Infinite, _ => deadline.Task));
+
+        var running = application.RunAsync(CreateArguments(transactionId), CancellationToken.None).AsTask();
+        try
+        {
+            await output.Blocked.WaitAsync(TimeSpan.FromSeconds(5));
+            deadline.SetResult();
+            await WaitUntilAsync(() => connection.AbortCount == 1);
+            Assert.IsFalse(running.IsCompleted);
+            Assert.IsFalse(output.ToString().Contains("fetch.terminal", StringComparison.Ordinal));
+        }
+        finally
+        {
+            deadline.TrySetResult();
+            output.Release();
+        }
+
+        var exit = await running.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.AreEqual(CliExitCode.Timeout, exit);
+        Assert.IsEmpty(ReadFacts(output));
+        StringAssert.Contains(Lines(output)[^1], "\"outcome\":\"timeout\"");
+        StringAssert.Contains(Lines(output)[^1], "deadline_exceeded_before_application");
+        Assert.AreEqual(1, connection.AbortCount);
+        Assert.AreEqual(1, connection.DisposeCount);
     }
 
     [TestMethod]
