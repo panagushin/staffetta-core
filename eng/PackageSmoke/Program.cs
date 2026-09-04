@@ -107,6 +107,10 @@ using (var session = new BsvPeerObservationSession(magic, 1_048_576, 70001, obse
     Require(session.Consume(Frame(magic, "inv"u8, inventoryPayload), out _) == OperationStatus.Done && session.PendingInventoryCount == 1, "Validated public inventory failed.");
     Span<InventoryVector> inventory = stackalloc InventoryVector[1];
     Require(session.DrainInventory(inventory, out _) == OperationStatus.Done && inventory[0].Hash == txid, "Inventory drain failed.");
+    Require(session.Consume(Frame(magic, "notfound"u8, inventoryPayload), out _) == OperationStatus.Done &&
+        session.HasPendingNotFound && session.PendingNotFoundCount == 1 && !session.HasPendingInventory, "Validated public notfound failed.");
+    Require(session.DrainNotFound(inventory, out _) == OperationStatus.Done && inventory[0].Hash == txid &&
+        !session.HasPendingNotFound, "Notfound drain failed.");
     Require(session.Consume(Frame(magic, "headers"u8, [0]), out _) == OperationStatus.Done && session.HasPendingHeaders, "Empty validated headers not surfaced.");
     Require(session.DrainHeaders([], out _) == OperationStatus.Done, "Headers drain failed.");
     byte[] transaction = new byte[61];

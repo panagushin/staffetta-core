@@ -78,6 +78,123 @@ public sealed class BsvPeerObservationSessionTests
     }
 
     [TestMethod]
+    public void NotFoundPreservesAllVectorsOnlyAfterValidationAndUntilEntireBatchDrains()
+    {
+        var requested = Hash256.DoubleSha256("requested"u8);
+        var other = Hash256.DoubleSha256("other"u8);
+        InventoryVector[] vectors = [new(1, requested), new(1, other), new(2, requested), new(99, other)];
+        var payload = new byte[145];
+        Assert.AreEqual(OperationStatus.Done, InventoryPayloadCodec.TryWrite(vectors, payload, 145, out _));
+        var frame = Frame("notfound"u8, payload);
+        for (var split = 1; split < frame.Length; split++)
+        {
+            using var session = Ready(maximumInventoryCount: 4);
+            Assert.AreEqual(OperationStatus.Done, session.RequestTransaction(requested));
+            _ = DrainWrites(session);
+            Assert.AreEqual(OperationStatus.NeedMoreData, session.Consume(frame.AsSpan(0, split), out var used));
+            Assert.AreEqual(split, used);
+            Assert.IsFalse(session.HasPendingNotFound);
+            Assert.AreEqual(0, session.PendingNotFoundCount);
+            Assert.AreEqual(OperationStatus.Done, session.DrainNotFound([], out var count));
+            Assert.AreEqual(0, count);
+            Assert.AreEqual(OperationStatus.Done, session.Consume(frame.AsSpan(split), out used));
+            Assert.AreEqual(frame.Length - split, used);
+            Assert.IsTrue(session.HasPendingNotFound);
+            Assert.AreEqual(4, session.PendingNotFoundCount);
+            Assert.IsFalse(session.HasPendingInventory);
+            Assert.AreEqual(0, session.PendingInventoryCount);
+            Assert.AreEqual(OperationStatus.Done, session.DrainInventory([], out count));
+            Assert.AreEqual(0, count);
+            Assert.IsTrue(session.HasPendingNotFound);
+            Assert.AreEqual(OperationStatus.DestinationTooSmall, session.Consume(Frame("inv"u8, [0]), out used));
+            Assert.AreEqual(0, used);
+            Assert.AreEqual(OperationStatus.DestinationTooSmall, session.CompleteEndOfInput());
+            Assert.AreEqual(OperationStatus.DestinationTooSmall, session.DrainNotFound(new InventoryVector[3], out count));
+            Assert.AreEqual(0, count);
+            Assert.AreEqual(4, session.PendingNotFoundCount);
+            var actual = new InventoryVector[4];
+            Assert.AreEqual(OperationStatus.Done, session.DrainNotFound(actual, out count));
+            Assert.AreEqual(4, count);
+            CollectionAssert.AreEqual(vectors, actual);
+            Assert.IsFalse(session.HasPendingNotFound);
+            Assert.AreEqual(0, session.PendingNotFoundCount);
+            Assert.AreEqual(OperationStatus.Done, session.Consume(Frame("inv"u8, payload), out _));
+            Assert.IsTrue(session.HasPendingInventory);
+            Assert.IsFalse(session.HasPendingNotFound);
+            Assert.AreEqual(OperationStatus.Done, session.DrainNotFound([], out count));
+            Assert.AreEqual(0, count);
+            Assert.IsTrue(session.HasPendingInventory);
+            Assert.AreEqual(OperationStatus.Done, session.DrainInventory(actual, out count));
+            Assert.AreEqual(4, count);
+            CollectionAssert.AreEqual(vectors, actual);
+        }
+    }
+
+    [TestMethod]
+    public void NotFoundChecksumFaultPartialEofMalformedPayloadAndConfiguredLimitPublishNoEvidence()
+    {
+        var payload = new byte[73];
+        Assert.AreEqual(OperationStatus.Done,
+            InventoryPayloadCodec.TryWrite([new(1, default), new(2, default)], payload, 73, out _));
+        var frame = Frame("notfound"u8, payload);
+        using var corrupt = Ready();
+        frame[20] ^= 1;
+        Assert.AreEqual(OperationStatus.NeedMoreData, corrupt.Consume(frame.AsSpan(0, frame.Length - 1), out _));
+        Assert.IsFalse(corrupt.HasPendingNotFound);
+        Assert.AreEqual(OperationStatus.InvalidData, corrupt.Consume(frame.AsSpan(frame.Length - 1), out _));
+        Assert.IsFalse(corrupt.HasPendingNotFound);
+        Assert.AreEqual(0, corrupt.PendingNotFoundCount);
+        Assert.IsFalse(corrupt.HasPendingInventory);
+
+        using var truncated = Ready();
+        frame[20] ^= 1;
+        Assert.AreEqual(OperationStatus.NeedMoreData, truncated.Consume(frame.AsSpan(0, frame.Length - 1), out _));
+        Assert.AreEqual(OperationStatus.InvalidData, truncated.CompleteEndOfInput());
+        Assert.IsFalse(truncated.HasPendingNotFound);
+        Assert.AreEqual(0, truncated.PendingNotFoundCount);
+
+        using var bounded = Ready(maximumInventoryCount: 1);
+        Assert.AreEqual(OperationStatus.InvalidData, bounded.Consume(Frame("notfound"u8, payload), out _));
+        Assert.IsFalse(bounded.HasPendingNotFound);
+        Assert.AreEqual(0, bounded.PendingNotFoundCount);
+
+        using var malformed = Ready();
+        payload[0] = 3;
+        Assert.AreEqual(OperationStatus.InvalidData, malformed.Consume(Frame("notfound"u8, payload), out _));
+        Assert.IsFalse(malformed.HasPendingNotFound);
+        Assert.AreEqual(0, malformed.PendingNotFoundCount);
+    }
+
+    [TestMethod]
+    public void EmptyAndUnsolicitedNotFoundAreObservedWithoutCreatingRequestOutcomes()
+    {
+        using var session = Ready();
+        Assert.AreEqual(OperationStatus.Done, session.Consume(Frame("notfound"u8, [0]), out _));
+        Assert.IsTrue(session.HasPendingNotFound);
+        Assert.AreEqual(0, session.PendingNotFoundCount);
+        Assert.IsFalse(session.HasPendingInventory);
+        Assert.AreEqual(OperationStatus.Done, session.DrainInventory([], out var count));
+        Assert.AreEqual(0, count);
+        Assert.AreEqual(OperationStatus.DestinationTooSmall, session.Consume(Frame("headers"u8, [0]), out var used));
+        Assert.AreEqual(0, used);
+        Assert.AreEqual(OperationStatus.Done, session.DrainNotFound([], out count));
+        Assert.AreEqual(0, count);
+        Assert.IsFalse(session.HasPendingNotFound);
+
+        var payload = new byte[37];
+        InventoryVector[] vectors = [new(1, Hash256.DoubleSha256("unsolicited"u8))];
+        Assert.AreEqual(OperationStatus.Done, InventoryPayloadCodec.TryWrite(vectors, payload, 37, out _));
+        Assert.AreEqual(OperationStatus.Done, session.Consume(Frame("notfound"u8, payload), out _));
+        Assert.AreEqual(1, session.PendingNotFoundCount);
+        var actual = new InventoryVector[1];
+        Assert.AreEqual(OperationStatus.Done, session.DrainNotFound(actual, out count));
+        Assert.AreEqual(1, count);
+        CollectionAssert.AreEqual(vectors, actual);
+        Assert.IsFalse(session.TryGetWrite(out _));
+        Assert.AreEqual(OperationStatus.Done, session.CompleteEndOfInput());
+    }
+
+    [TestMethod]
     public void HeadersValidateEntireFrameBeforePublishingAndEnforceConfiguredBounds()
     {
         BlockHeader[] headers = [new(1, default, Hash256.DoubleSha256("merkle"u8), 1, 0x1d00ffff, 1)];

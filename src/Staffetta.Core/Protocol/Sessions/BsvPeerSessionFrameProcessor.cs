@@ -372,7 +372,7 @@ internal sealed class BsvPeerSessionFrameProcessor :
             for (var index = 0; index < vectorsWritten; index++)
             {
                 ref readonly var vector = ref _inventoryBatch[index];
-                if (_activeRoute == FrameRoute.Inventory &&
+                if (_activeRoute is FrameRoute.Inventory or FrameRoute.NotFound &&
                     _observations is not null && !_observations.StageInventory(vector))
                 {
                     return OperationStatus.InvalidData;
@@ -461,6 +461,10 @@ internal sealed class BsvPeerSessionFrameProcessor :
                 if (_activeRoute == FrameRoute.Inventory)
                 {
                     _observations?.CommitInventory();
+                }
+                else if (_activeRoute == FrameRoute.NotFound)
+                {
+                    _observations?.CommitNotFound();
                 }
 
                 return _activeRoute switch

@@ -25,10 +25,12 @@ internal sealed class BsvPeerObservationBuffers
 
     internal ulong MaximumHeaderPayloadLength => (ulong)_headerPayload.Length;
     internal int PendingInventoryCount { get; private set; }
+    internal int PendingNotFoundCount { get; private set; }
     internal int PendingHeaderCount { get; private set; }
     internal bool HasPendingInventory { get; private set; }
+    internal bool HasPendingNotFound { get; private set; }
     internal bool HasPendingHeaders { get; private set; }
-    internal bool HasPending => HasPendingInventory || HasPendingHeaders;
+    internal bool HasPending => HasPendingInventory || HasPendingNotFound || HasPendingHeaders;
 
     internal bool StageInventory(in InventoryVector vector)
     {
@@ -45,6 +47,12 @@ internal sealed class BsvPeerObservationBuffers
     {
         PendingInventoryCount = _stagedInventoryCount;
         HasPendingInventory = true;
+    }
+
+    internal void CommitNotFound()
+    {
+        PendingNotFoundCount = _stagedInventoryCount;
+        HasPendingNotFound = true;
     }
 
     internal OperationStatus StageHeaders(ReadOnlySpan<byte> bytes)
@@ -88,6 +96,22 @@ internal sealed class BsvPeerObservationBuffers
         return OperationStatus.Done;
     }
 
+    internal OperationStatus DrainNotFound(Span<InventoryVector> destination, out int count)
+    {
+        count = 0;
+        if (destination.Length < PendingNotFoundCount)
+        {
+            return OperationStatus.DestinationTooSmall;
+        }
+
+        count = PendingNotFoundCount;
+        _inventory.AsSpan(0, count).CopyTo(destination);
+        _inventory.AsSpan(0, count).Clear();
+        PendingNotFoundCount = 0;
+        HasPendingNotFound = false;
+        return OperationStatus.Done;
+    }
+
     internal OperationStatus DrainHeaders(Span<BlockHeader> destination, out int count)
     {
         count = 0;
@@ -106,7 +130,7 @@ internal sealed class BsvPeerObservationBuffers
 
     internal void ResetStaging()
     {
-        if (!HasPendingInventory)
+        if (!HasPendingInventory && !HasPendingNotFound)
         {
             _inventory.AsSpan(0, _stagedInventoryCount).Clear();
         }
@@ -119,8 +143,10 @@ internal sealed class BsvPeerObservationBuffers
     internal void Discard()
     {
         HasPendingInventory = false;
+        HasPendingNotFound = false;
         HasPendingHeaders = false;
         PendingInventoryCount = 0;
+        PendingNotFoundCount = 0;
         PendingHeaderCount = 0;
         _inventory.AsSpan().Clear();
         _headers.AsSpan().Clear();

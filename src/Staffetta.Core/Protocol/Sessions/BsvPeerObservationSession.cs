@@ -20,7 +20,7 @@ public readonly struct BsvPeerWriteLease
     public ReadOnlyMemory<byte> Bytes => Segment.Memory;
 }
 
-/// <summary>A transport-free, single-peer BSV observation driver with validated inventory and headers and streaming transactions.</summary>
+/// <summary>A transport-free, single-peer BSV observation driver with validated inventory, notfound and headers and streaming transactions.</summary>
 /// <remarks>
 /// Single-consumer and not thread-safe; callbacks must not re-enter this instance. The caller owns
 /// sockets, timeouts, scheduling, persistence, and transaction staging. Drain validated observations
@@ -60,10 +60,14 @@ public sealed class BsvPeerObservationSession : IDisposable
 
     /// <summary>Gets the protocol handshake state without performing I/O.</summary>
     public BsvHandshakeState HandshakeState => _session.HandshakeState;
-    /// <summary>Gets whether a complete validated inventory message awaits drainage, including an empty message.</summary>
+    /// <summary>Gets whether a complete validated inv message awaits drainage, including an empty message; excludes notfound.</summary>
     public bool HasPendingInventory => _observations.HasPendingInventory;
-    /// <summary>Gets the number of validated inventory records awaiting drainage.</summary>
+    /// <summary>Gets the number of validated inv records awaiting drainage; excludes notfound.</summary>
     public int PendingInventoryCount => _observations.PendingInventoryCount;
+    /// <summary>Gets whether a complete validated notfound message awaits drainage, including an empty message.</summary>
+    public bool HasPendingNotFound => _observations.HasPendingNotFound;
+    /// <summary>Gets the number of validated notfound records awaiting drainage, without filtering or request correlation.</summary>
+    public int PendingNotFoundCount => _observations.PendingNotFoundCount;
     /// <summary>Gets whether a complete validated headers message awaits drainage, including an empty message.</summary>
     public bool HasPendingHeaders => _observations.HasPendingHeaders;
     /// <summary>Gets the number of validated headers awaiting drainage.</summary>
@@ -252,11 +256,20 @@ public sealed class BsvPeerObservationSession : IDisposable
         return StartCommand("getheaders"u8);
     }
 
-    /// <summary>Copies the entire validated inventory batch; insufficient destination leaves it pending.</summary>
+    /// <summary>Copies the entire validated inv batch, excluding notfound; insufficient destination leaves it pending.</summary>
     public OperationStatus DrainInventory(Span<InventoryVector> destination, out int count)
     {
         CheckAvailable();
         return _observations.DrainInventory(destination, out count);
+    }
+
+    /// <summary>Copies the entire validated notfound batch; insufficient destination leaves it pending.</summary>
+    /// <remarks>All vector types are preserved. This is peer-reported evidence, not a correlated request outcome or proof of network absence. Shares the constructor's maximumInventoryCount bound with inv; either pending batch blocks further intake.</remarks>
+    /// <returns>Done with zero records when no notfound is pending, or DestinationTooSmall with zero records and no change to the pending batch.</returns>
+    public OperationStatus DrainNotFound(Span<InventoryVector> destination, out int count)
+    {
+        CheckAvailable();
+        return _observations.DrainNotFound(destination, out count);
     }
 
     /// <summary>Copies the entire serialization-validated headers batch; this does not establish consensus validity.</summary>
