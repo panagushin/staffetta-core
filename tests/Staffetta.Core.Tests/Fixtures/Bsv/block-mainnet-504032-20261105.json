@@ -1,0 +1,25 @@
+{
+  "peer": "95.217.38.93",
+  "blockHash": "00000000000000000343e9875012f2062554c8752929892c82a0c0743ac7dcfd",
+  "broadcast": false,
+  "commands": [
+    "version",
+    "verack",
+    "protoconf",
+    "authch",
+    "sendheaders",
+    "sendcmpct",
+    "ping",
+    "addr",
+    "block"
+  ],
+  "result": "captured",
+  "payloadBytes": 56076,
+  "sha256": "5e5d8672814c49ccdbcb2a7da4307ea8b3ae240bd9b9228b9a35134247b6d727",
+  "seconds": 0.519,
+  "schema": "staffetta-live-block-fixture/v1",
+  "height": 504032,
+  "payloadFile": "block-mainnet-504032-20261105.bin",
+  "capturedUtc": "2026-11-04T21:33:21.155946+00:00",
+  "validation": "wire checksum and requested header hash; not script execution"
+}

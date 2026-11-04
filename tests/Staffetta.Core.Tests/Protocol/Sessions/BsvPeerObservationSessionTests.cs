@@ -17,6 +17,44 @@ public sealed class BsvPeerObservationSessionTests
     private static ReadOnlySpan<byte> Magic => [0xe3, 0xe1, 0xf3, 0xe8];
 
     [TestMethod]
+    public void BlockPublicationWaitsForChecksumAndGetdataUsesBlockInventoryType()
+    {
+        var block = Staffetta.Core.Tests.Protocol.Blocks.LegacyBlockParserTests.Block(3);
+        var frames = new BlockSink();
+        using var session = Ready(blockSink: frames);
+        var hash = Hash256.DoubleSha256(block.AsSpan(0, 80));
+        Assert.AreEqual(OperationStatus.Done, session.RequestBlock(hash));
+        var request = DrainWrites(session);
+        Assert.AreEqual(2U, BinaryPrimitives.ReadUInt32LittleEndian(request.AsSpan(25)));
+        CollectionAssert.AreEqual(HashBytes(hash), request[29..]);
+        var frame = Frame("block"u8, block);
+        Assert.AreEqual(OperationStatus.NeedMoreData, session.Consume(frame.AsSpan(0, frame.Length - 1), out _));
+        Assert.AreEqual(0, frames.Commits);
+        Assert.AreEqual(OperationStatus.Done, session.Consume(frame.AsSpan(frame.Length - 1), out _));
+        Assert.AreEqual(1, frames.Commits);
+
+        var rejected = new BlockSink();
+        using var invalid = Ready(blockSink: rejected);
+        frame[20] ^= 1;
+        Assert.AreEqual(OperationStatus.InvalidData, invalid.Consume(frame, out _));
+        Assert.AreEqual(0, rejected.Commits);
+        Assert.AreEqual(1, rejected.Aborts);
+    }
+
+    private static byte[] HashBytes(Hash256 hash) { var bytes = new byte[32]; hash.TryCopyWireBytesTo(bytes, out _); return bytes; }
+
+    private sealed class BlockSink : IBlockSink
+    {
+        internal int Commits;
+        internal int Aborts;
+        public void OnBlockStarted(in BlockHeader header, ulong count) { }
+        public void OnTransactionStarted(ulong index) { }
+        public void OnMerkleNode(int level, ulong index, Hash256 hash) { }
+        public void OnBlockCommitted(in LegacyBlockSummary summary) => Commits++;
+        public void OnBlockAborted() => Aborts++;
+    }
+
+    [TestMethod]
     public void RawPayloadIsExactAcrossAllSplitsAndRemainsProvisionalOnCorruption()
     {
         var transaction = Transaction();
@@ -417,9 +455,9 @@ public sealed class BsvPeerObservationSessionTests
         Assert.AreEqual(0, sink.Commits);
     }
 
-    private static BsvPeerObservationSession Ready(Sink? sink = null, int maximumInventoryCount = 3, ITransactionPayloadSink? payloadSink = null)
+    private static BsvPeerObservationSession Ready(Sink? sink = null, int maximumInventoryCount = 3, ITransactionPayloadSink? payloadSink = null, IBlockSink? blockSink = null)
     {
-        var session = new BsvPeerObservationSession(Magic, 4_000_000, 70001, sink ?? new Sink(), payloadSink, maximumInventoryCount, 2);
+        var session = new BsvPeerObservationSession(Magic, 4_000_000, 70001, sink ?? new Sink(), payloadSink, blockSink, maximumInventoryCount, 2);
         var local = Version(1);
         Assert.AreEqual(OperationStatus.Done, session.StartHandshake(local, 1_048_576));
         _ = DrainWrites(session);

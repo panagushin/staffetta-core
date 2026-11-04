@@ -1,4 +1,5 @@
 using System.Buffers;
+using Staffetta.Core.Protocol.Blocks;
 using Staffetta.Core.Protocol.Cryptography;
 using Staffetta.Core.Protocol.Handshake;
 using Staffetta.Core.Protocol.Relay;
@@ -70,14 +71,15 @@ public sealed class BsvPeerSessionIngressAdapter :
         ulong maximumPayloadLength,
         int minimumPeerProtocolVersion,
         ILegacyTransactionSink transactionSink,
-        BsvPeerObservationBuffers? observations, ITransactionPayloadSink? payloadSink = null)
+        BsvPeerObservationBuffers? observations, ITransactionPayloadSink? payloadSink = null, IBlockSink? blockSink = null)
     {
         _processor = new BsvPeerSessionFrameProcessor(
             minimumPeerProtocolVersion,
             new GuardedTransactionSink(
                 this,
                 transactionSink ?? throw new ArgumentNullException(nameof(transactionSink))),
-            observations, payloadSink is null ? null : new GuardedPayloadSink(this, payloadSink));
+            observations, payloadSink is null ? null : new GuardedPayloadSink(this, payloadSink),
+            blockSink is null ? null : new GuardedBlockSink(this, blockSink));
         _ingress = new MessageIngressStateMachine(
             expectedNetworkMagic,
             maximumPayloadLength,
@@ -703,6 +705,15 @@ public sealed class BsvPeerSessionIngressAdapter :
             inner.OnTransactionPayload(bytes);
             owner.ThrowIfCallbackReentered();
         }
+    }
+
+    private sealed class GuardedBlockSink(BsvPeerSessionIngressAdapter owner, IBlockSink inner) : IBlockSink
+    {
+        public void OnBlockStarted(in BlockHeader header, ulong count) { inner.OnBlockStarted(header, count); owner.ThrowIfCallbackReentered(); }
+        public void OnTransactionStarted(ulong index) { inner.OnTransactionStarted(index); owner.ThrowIfCallbackReentered(); }
+        public void OnMerkleNode(int level, ulong index, Hash256 hash) { inner.OnMerkleNode(level, index, hash); owner.ThrowIfCallbackReentered(); }
+        public void OnBlockCommitted(in LegacyBlockSummary summary) { inner.OnBlockCommitted(summary); owner.ThrowIfCallbackReentered(); }
+        public void OnBlockAborted() { inner.OnBlockAborted(); owner.ThrowIfCallbackReentered(); }
     }
 
     private sealed class GuardedTransactionSink : ILegacyTransactionSink

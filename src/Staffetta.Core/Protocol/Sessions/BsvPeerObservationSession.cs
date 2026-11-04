@@ -60,10 +60,19 @@ public sealed class BsvPeerObservationSession : IDisposable
     public BsvPeerObservationSession(ReadOnlySpan<byte> networkMagic, ulong maximumPayloadLength,
         int minimumPeerProtocolVersion, ILegacyTransactionSink transactionSink, ITransactionPayloadSink? payloadSink,
         int maximumInventoryCount = 50_000, int maximumHeaderCount = 2_000)
+        : this(networkMagic, maximumPayloadLength, minimumPeerProtocolVersion, transactionSink, payloadSink, null,
+            maximumInventoryCount, maximumHeaderCount)
+    {
+    }
+
+    /// <summary>Creates a driver with optional provisional block parsing; transactions inside blocks publish only at block commit.</summary>
+    public BsvPeerObservationSession(ReadOnlySpan<byte> networkMagic, ulong maximumPayloadLength,
+        int minimumPeerProtocolVersion, ILegacyTransactionSink transactionSink, ITransactionPayloadSink? payloadSink,
+        IBlockSink? blockSink, int maximumInventoryCount = 50_000, int maximumHeaderCount = 2_000)
     {
         _observations = new BsvPeerObservationBuffers(maximumInventoryCount, maximumHeaderCount);
         _session = new BsvPeerSessionIngressAdapter(networkMagic, maximumPayloadLength,
-            minimumPeerProtocolVersion, transactionSink, _observations, payloadSink);
+            minimumPeerProtocolVersion, transactionSink, _observations, payloadSink, blockSink);
         _magic = networkMagic.ToArray();
     }
 
@@ -107,7 +116,7 @@ public sealed class BsvPeerObservationSession : IDisposable
         return OperationStatus.Done;
     }
 
-    /// <summary>Consumes at most one frame; transaction callbacks are provisional until their commit callback.</summary>
+    /// <summary>Consumes at most one frame; transaction callbacks inside blocks remain provisional until the enclosing block commits.</summary>
     /// <returns>Done, NeedMoreData, DestinationTooSmall while observations or writes remain, or InvalidData on terminal failure.</returns>
     public OperationStatus Consume(ReadOnlySpan<byte> bytes, out int bytesConsumed)
     {
@@ -225,6 +234,13 @@ public sealed class BsvPeerObservationSession : IDisposable
     /// <summary>Requests one transaction by explicit command intent; no peer inventory or delivery fact is fabricated.</summary>
     /// <returns>Done when queued, DestinationTooSmall while another write remains, otherwise InvalidData.</returns>
     public OperationStatus RequestTransaction(Hash256 transactionId)
+        => RequestObject(1, transactionId);
+
+    /// <summary>Queues getdata for a block hash; the caller owns request correlation, deadlines and selected-chain admission.</summary>
+    /// <returns>Done when queued, DestinationTooSmall while another write remains, otherwise InvalidData.</returns>
+    public OperationStatus RequestBlock(Hash256 blockHash) => RequestObject(2, blockHash);
+
+    private OperationStatus RequestObject(uint type, Hash256 hash)
     {
         var status = CanRequest();
         if (status != OperationStatus.Done)
@@ -233,7 +249,7 @@ public sealed class BsvPeerObservationSession : IDisposable
         }
 
         Span<InventoryVector> vectors = stackalloc InventoryVector[1];
-        vectors[0] = new InventoryVector(1, transactionId);
+        vectors[0] = new InventoryVector(type, hash);
         _ = InventoryPayloadCodec.TryWrite(vectors, _commandPayload, (ulong)_commandPayload.Length, out _commandPayloadLength);
         return StartCommand("getdata"u8);
     }

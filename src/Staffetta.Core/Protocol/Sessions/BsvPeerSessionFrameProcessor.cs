@@ -35,6 +35,7 @@ internal sealed class BsvPeerSessionFrameProcessor :
     private readonly LegacyTransactionParser _transactionParser;
     private readonly BsvPeerObservationBuffers? _observations;
     private readonly ITransactionPayloadSink? _payloadSink;
+    private readonly LegacyBlockParser? _blockParser;
 
     private FrameRoute _activeRoute;
     private ulong _activePayloadLength;
@@ -51,10 +52,11 @@ internal sealed class BsvPeerSessionFrameProcessor :
     internal BsvPeerSessionFrameProcessor(
         int minimumPeerProtocolVersion,
         ILegacyTransactionSink transactionSink,
-        BsvPeerObservationBuffers? observations = null, ITransactionPayloadSink? payloadSink = null)
+        BsvPeerObservationBuffers? observations = null, ITransactionPayloadSink? payloadSink = null, IBlockSink? blockSink = null)
     {
         _observations = observations;
         _payloadSink = payloadSink;
+        _blockParser = blockSink is null ? null : new LegacyBlockParser(blockSink, transactionSink, payloadSink);
         _handshakeProcessor = new BsvHandshakeFrameProcessor(
             minimumPeerProtocolVersion,
             trackEgressProvenance: true);
@@ -251,6 +253,7 @@ internal sealed class BsvPeerSessionFrameProcessor :
     public void Dispose()
     {
         _transactionParser.Dispose();
+        _blockParser?.Dispose();
         _handshakeProcessor.Dispose();
         _relay.Dispose();
         _inventoryBatch.AsSpan().Clear();
@@ -268,6 +271,7 @@ internal sealed class BsvPeerSessionFrameProcessor :
             FrameRoute.Transaction =>
                 HandshakeState == BsvHandshakeState.Ready &&
                 header.PayloadLength >= MinimumLegacyTransactionPayloadLength,
+            FrameRoute.Block => HandshakeState == BsvHandshakeState.Ready && header.PayloadLength >= 81,
             FrameRoute.Headers => HandshakeState == BsvHandshakeState.Ready &&
                 header.PayloadLength is >= 1 &&
                 header.PayloadLength <= (_observations?.MaximumHeaderPayloadLength ?? 0),
@@ -316,6 +320,7 @@ internal sealed class BsvPeerSessionFrameProcessor :
             FrameRoute.Inventory or FrameRoute.GetData or FrameRoute.NotFound =>
                 ConsumeInventoryPayload(payload),
             FrameRoute.Transaction => ConsumeTransactionPayload(payload),
+            FrameRoute.Block => ConsumeBlockPayload(payload),
             FrameRoute.Headers => _observations!.StageHeaders(payload),
             FrameRoute.RelayReject => ConsumeRejectPayload(payload),
             _ => OperationStatus.InvalidData,
@@ -438,6 +443,16 @@ internal sealed class BsvPeerSessionFrameProcessor :
         };
     }
 
+    private OperationStatus ConsumeBlockPayload(ReadOnlySpan<byte> payload)
+    {
+        var status = _blockParser!.Consume(payload, out var used);
+        _activePayloadBytes = checked(_activePayloadBytes + (ulong)used);
+        return used == payload.Length &&
+            ((status == OperationStatus.Done && _activePayloadBytes == _activePayloadLength) ||
+             (status == OperationStatus.NeedMoreData && _activePayloadBytes < _activePayloadLength))
+            ? OperationStatus.Done : OperationStatus.InvalidData;
+    }
+
     private OperationStatus ConsumeRejectPayload(ReadOnlySpan<byte> payload)
     {
         if (_rejectPayloadLength > _rejectPayload.Length - payload.Length)
@@ -517,6 +532,9 @@ internal sealed class BsvPeerSessionFrameProcessor :
                 _hasPendingMonetaryValidation = true;
                 return OperationStatus.Done;
 
+            case FrameRoute.Block:
+                return _activePayloadBytes == _activePayloadLength ? _blockParser!.Commit(out _) : OperationStatus.InvalidData;
+
             case FrameRoute.RelayReject:
                 var rejectStatus = RejectPayloadCodec.TryParse(
                     _rejectPayload.AsSpan(0, _rejectPayloadLength),
@@ -541,6 +559,7 @@ internal sealed class BsvPeerSessionFrameProcessor :
 
     private void AbortTransactionIfActive()
     {
+        if (_activeRoute == FrameRoute.Block) { _blockParser!.Abort(); }
         if (_activeRoute == FrameRoute.Transaction && !_transactionParser.IsFaulted)
         {
             _transactionParser.Abort();
@@ -563,6 +582,10 @@ internal sealed class BsvPeerSessionFrameProcessor :
 
     private FrameRoute Classify(in MessageCommand command, bool isReady)
     {
+        if (_blockParser is not null && command.Equals("block"u8))
+        {
+            return isReady ? FrameRoute.Block : FrameRoute.EarlyRelay;
+        }
         if (_observations is not null && command.Equals("headers"u8))
         {
             return isReady ? FrameRoute.Headers : FrameRoute.EarlyRelay;
@@ -617,5 +640,6 @@ internal sealed class BsvPeerSessionFrameProcessor :
         RelayReject,
         EarlyRelay,
         Headers,
+        Block,
     }
 }

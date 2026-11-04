@@ -22,6 +22,15 @@ steps and owns I/O, scheduling, storage, staging and recovery.
 `BsvSelectedHeaderChain` provides contextual header
 admission over explicitly trusted bootstrap history; it does not authenticate
 that initial trust anchor or prove transaction inclusion.
+`LegacyBlockParser` streams legacy block payloads with fixed header scratch and
+a logarithmic Merkle frontier. It emits indexed transaction callbacks and
+Merkle nodes without retaining the block body. Inside a block, transaction
+callbacks remain provisional until the block commits after its complete root
+and enclosing wire frame have been checked. The observation driver optionally
+routes blocks through this parser and exposes an explicit `RequestBlock` intent.
+Block parsing checks serialization, monetary output ranges and visible Merkle
+mutation; header-chain admission, scripts, input availability and subsidy rules
+remain separate concerns.
 No API compatibility or production-readiness commitment is made before
 the first release.
 
