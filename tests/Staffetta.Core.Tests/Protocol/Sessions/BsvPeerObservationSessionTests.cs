@@ -17,6 +17,36 @@ public sealed class BsvPeerObservationSessionTests
     private static ReadOnlySpan<byte> Magic => [0xe3, 0xe1, 0xf3, 0xe8];
 
     [TestMethod]
+    public void MempoolRequiresReadySessionAndProducesAnEmptyAcknowledgedCommand()
+    {
+        using var created = new BsvPeerObservationSession(Magic, 4_000_000, 70001, new Sink());
+        Assert.AreEqual(OperationStatus.InvalidData, created.RequestMempool());
+        using var ready = Ready();
+        Assert.AreEqual(OperationStatus.Done, ready.RequestMempool());
+        Assert.AreEqual(OperationStatus.DestinationTooSmall, ready.RequestMempool());
+        var frame = DrainWrites(ready);
+        Assert.AreEqual(24, frame.Length);
+        CollectionAssert.AreEqual(Frame("mempool"u8, []), frame);
+        Assert.IsFalse(ready.HasPendingInventory);
+    }
+
+    [TestMethod]
+    public void ServiceFlagsAreUnavailableUntilVersionChecksumPasses()
+    {
+        var payload = new byte[256];
+        var version = new VersionPayload(70016, 37, 1, default, default, 2, "peer"u8, 0, true);
+        _ = VersionPayloadCodec.TryWrite(payload, version, out var length);
+        var frame = Frame("version"u8, payload.AsSpan(0, length));
+        using var session = new BsvPeerObservationSession(Magic, 4_000_000, 70001, new Sink());
+        Assert.AreEqual(OperationStatus.Done, session.StartHandshake(Version(1), 4_000_000));
+        _ = DrainWrites(session);
+        Assert.AreEqual(OperationStatus.NeedMoreData, session.Consume(frame.AsSpan(0, frame.Length - 1), out _));
+        Assert.AreEqual(0UL, session.PeerServices);
+        Assert.AreEqual(OperationStatus.Done, session.Consume(frame.AsSpan(frame.Length - 1), out _));
+        Assert.AreEqual(37UL, session.PeerServices);
+    }
+
+    [TestMethod]
     public void PublicDriverHandshakesAndRequestsArbitraryTransactionWithoutInventingInventory()
     {
         using var session = Ready();

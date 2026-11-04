@@ -65,6 +65,9 @@ public sealed class BsvHandshakeStateMachine
     /// <summary>Gets the accepted peer version, or zero until HasPeerVersion is true.</summary>
     public int PeerProtocolVersion => _peerProtocolVersion;
 
+    /// <summary>Gets accepted version service flags; advertisements are not access-policy guarantees.</summary>
+    public ulong PeerServices { get; private set; }
+
     /// <summary>Gets the accepted peer nonce, or zero until HasPeerVersion is true.</summary>
     public ulong PeerNonce => _peerNonce;
 
@@ -209,6 +212,7 @@ public sealed class BsvHandshakeStateMachine
         _hasPeerVersion = true;
         _peerProtocolVersion = input.ProtocolVersion;
         _peerNonce = input.Value;
+        PeerServices = input.Services;
         _localVerackIntent = true;
         destination[0] = new BsvHandshakeOutput(BsvHandshakeOutputKind.SendVerack);
         destination[1] = new BsvHandshakeOutput(BsvHandshakeOutputKind.SendProtoconf);

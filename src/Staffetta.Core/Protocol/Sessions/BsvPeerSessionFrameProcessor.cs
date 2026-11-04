@@ -70,6 +70,7 @@ internal sealed class BsvPeerSessionFrameProcessor :
     internal bool HasPeerVersion => _handshakeProcessor.Handshake.HasPeerVersion;
 
     internal int PeerProtocolVersion => _handshakeProcessor.Handshake.PeerProtocolVersion;
+    internal ulong PeerServices => _handshakeProcessor.Handshake.PeerServices;
 
     internal ulong PeerNonce => _handshakeProcessor.Handshake.PeerNonce;
 

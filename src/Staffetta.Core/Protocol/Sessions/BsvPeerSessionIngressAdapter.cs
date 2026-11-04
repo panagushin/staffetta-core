@@ -100,6 +100,9 @@ public sealed class BsvPeerSessionIngressAdapter :
     /// <summary>Admitted peer version, meaningful when <see cref="HasPeerVersion"/> is true.</summary>
     public int PeerProtocolVersion => _processor.PeerProtocolVersion;
 
+    /// <summary>Gets accepted version service flags; not proof that the peer permits a request.</summary>
+    public ulong PeerServices => _processor.PeerServices;
+
     /// <summary>Nonce from the admitted peer version payload.</summary>
     public ulong PeerNonce => _processor.PeerNonce;
 

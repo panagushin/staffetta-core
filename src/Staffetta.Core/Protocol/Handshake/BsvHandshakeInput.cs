@@ -26,11 +26,12 @@ public enum BsvHandshakeInputKind
 /// <summary>A copied event supplied after frame and payload validation.</summary>
 public readonly struct BsvHandshakeInput
 {
-    private BsvHandshakeInput(BsvHandshakeInputKind kind, int protocolVersion, ulong value)
+    private BsvHandshakeInput(BsvHandshakeInputKind kind, int protocolVersion, ulong value, ulong services = 0)
     {
         Kind = kind;
         ProtocolVersion = protocolVersion;
         Value = value;
+        Services = services;
     }
 
     /// <summary>Gets the event kind that determines how the remaining fields are interpreted.</summary>
@@ -42,9 +43,16 @@ public readonly struct BsvHandshakeInput
     /// <summary>Gets the nonce for version/ping/pong, the receive limit for protoconf, or zero for other events.</summary>
     public ulong Value { get; }
 
+    /// <summary>Gets service flags for a validated peer version; zero for other events.</summary>
+    public ulong Services { get; }
+
     /// <summary>Reports a validated version's protocol version and peer nonce.</summary>
     public static BsvHandshakeInput PeerVersion(int protocolVersion, ulong nonce) =>
         new(BsvHandshakeInputKind.PeerVersion, protocolVersion, nonce);
+
+    /// <summary>Reports a validated version including its advertised service flags.</summary>
+    public static BsvHandshakeInput PeerVersion(int protocolVersion, ulong nonce, ulong services) =>
+        new(BsvHandshakeInputKind.PeerVersion, protocolVersion, nonce, services);
 
     /// <summary>Reports a validated empty verack.</summary>
     public static BsvHandshakeInput PeerVerack() => new(BsvHandshakeInputKind.PeerVerack, 0, 0);

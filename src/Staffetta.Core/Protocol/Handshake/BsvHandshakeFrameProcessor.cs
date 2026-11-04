@@ -221,7 +221,7 @@ internal sealed class BsvHandshakeFrameProcessor : IDisposable
                     out var versionBytesConsumed);
                 if (versionStatus == OperationStatus.Done && versionBytesConsumed == payload.Length)
                 {
-                    input = BsvHandshakeInput.PeerVersion(version.ProtocolVersion, version.Nonce);
+                    input = BsvHandshakeInput.PeerVersion(version.ProtocolVersion, version.Nonce, version.Services);
                 }
 
                 return versionStatus == OperationStatus.Done && versionBytesConsumed != payload.Length

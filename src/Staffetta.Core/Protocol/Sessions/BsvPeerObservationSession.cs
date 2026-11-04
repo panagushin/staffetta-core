@@ -60,6 +60,8 @@ public sealed class BsvPeerObservationSession : IDisposable
 
     /// <summary>Gets the protocol handshake state without performing I/O.</summary>
     public BsvHandshakeState HandshakeState => _session.HandshakeState;
+    /// <summary>Gets service flags from the accepted peer version; not an access-policy guarantee.</summary>
+    public ulong PeerServices => _session.PeerServices;
     /// <summary>Gets whether a complete validated inv message awaits drainage, including an empty message; excludes notfound.</summary>
     public bool HasPendingInventory => _observations.HasPendingInventory;
     /// <summary>Gets the number of validated inv records awaiting drainage; excludes notfound.</summary>
@@ -254,6 +256,21 @@ public sealed class BsvPeerObservationSession : IDisposable
         _ = stopHash.TryCopyWireBytesTo(_commandPayload.AsSpan(offset), out _);
         _commandPayloadLength = offset + Hash256.Length;
         return StartCommand("getheaders"u8);
+    }
+
+    /// <summary>Queues one empty BIP-35 request. The caller must check peer capabilities and access policy.</summary>
+    /// <remarks>Replies are ordinary inventories with no request identifier or snapshot-completion marker.</remarks>
+    /// <returns>Done when queued, DestinationTooSmall while a write remains, otherwise InvalidData.</returns>
+    public OperationStatus RequestMempool()
+    {
+        var status = CanRequest();
+        if (status != OperationStatus.Done)
+        {
+            return status;
+        }
+
+        _commandPayloadLength = 0;
+        return StartCommand("mempool"u8);
     }
 
     /// <summary>Copies the entire validated inv batch, excluding notfound; insufficient destination leaves it pending.</summary>
