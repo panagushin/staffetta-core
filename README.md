@@ -112,6 +112,33 @@ real funds. Use only transaction bytes and peers you intend to use; it is not
 a dry run. `SentToPeer` means a transport write was committed, not that a miner
 accepted or included the transaction. Run `--help` for timeout controls.
 
+## Bounded mempool probe
+
+The non-packaged live-probe project has a read-only BIP-35 experiment:
+
+```sh
+dotnet run --project spikes/Staffetta.Bsv.LiveProbe --configuration Release -- \
+  mempool --peer <IPv4:port> --output <new-directory> --seconds 25 --relay false
+```
+
+It sends one empty `mempool` request after handshake and requests at most eight
+sample transactions from received inventories. For a live-relay control run,
+use `--relay true --request false`. Inventories have no request identifier;
+with live relay enabled, an announcement after the request does not establish
+that it came from the requested snapshot. Peers can refuse the request or
+disconnect; no complete-mempool claim is made. Check peer service and access
+policies before using the request in an application.
+
+The probe is bounded to 10–60 seconds, 50,000 distinct transaction IDs, 1,024
+received frames, 16 MiB per frame, and 64 MiB of complete received frames.
+These are explicit exploratory admission budgets, not protocol or product
+limits. It never broadcasts a transaction. It writes `evidence.json` and
+captured basic wire frames; accepted frames use `.wire`, interrupted or rejected
+candidates keep `.partial`. Transaction samples pass Core framing, structural
+and monetary-range checks, not full script or consensus validation. Capture
+files are operational evidence, not automatically admitted test fixtures.
+The probe requires an explicit endpoint and contains no default peer list.
+
 ## Contributing and security
 
 Contributions are Apache-2.0 with the [Developer Certificate of Origin](https://developercertificate.org/).

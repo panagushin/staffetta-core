@@ -77,7 +77,7 @@ internal static class ProbeWireEncoder
         return EncodeFrame(command, payload[..payloadLength]);
     }
 
-    private static byte[] EncodeFrame(ReadOnlySpan<byte> command, ReadOnlySpan<byte> payload)
+    internal static byte[] EncodeFrame(ReadOnlySpan<byte> command, ReadOnlySpan<byte> payload)
     {
         var checksum = MessageChecksum.Compute(payload);
         Span<byte> checksumBytes = stackalloc byte[MessageChecksum.Length];
