@@ -17,6 +17,54 @@ public sealed class BsvPeerObservationSessionTests
     private static ReadOnlySpan<byte> Magic => [0xe3, 0xe1, 0xf3, 0xe8];
 
     [TestMethod]
+    public void RawPayloadIsExactAcrossAllSplitsAndRemainsProvisionalOnCorruption()
+    {
+        var transaction = Transaction();
+        var frame = Frame("tx"u8, transaction);
+        for (var split = 1; split < frame.Length; split++)
+        {
+            var raw = new PayloadSink();
+            var sink = new Sink();
+            using var session = Ready(sink, payloadSink: raw);
+            Assert.AreEqual(0, raw.Bytes.Length);
+            Assert.AreEqual(OperationStatus.NeedMoreData, session.Consume(frame.AsSpan(0, split), out _));
+            Assert.AreEqual(0, sink.Commits);
+            Assert.AreEqual(OperationStatus.Done, session.Consume(frame.AsSpan(split), out _));
+            CollectionAssert.AreEqual(transaction, raw.Bytes.ToArray());
+            Assert.AreEqual(1, sink.Commits);
+        }
+        var corrupted = new PayloadSink();
+        var rejected = new Sink();
+        using var invalid = Ready(rejected, payloadSink: corrupted);
+        frame[20] ^= 1;
+        Assert.AreEqual(OperationStatus.InvalidData, invalid.Consume(frame, out _));
+        Assert.AreEqual(0, rejected.Commits);
+        Assert.IsTrue(corrupted.Bytes.Length > 0, "Captured bytes are provisional even when later rejected.");
+    }
+
+    [TestMethod]
+    public void SwallowedRawCallbackReentryPreventsCommit()
+    {
+        var raw = new PayloadSink();
+        var sink = new Sink();
+        using var session = Ready(sink, payloadSink: raw);
+        raw.Callback = () =>
+        {
+            try { _ = session.RequestMempool(); }
+            catch (InvalidOperationException) { }
+        };
+        Assert.ThrowsException<InvalidOperationException>(() => session.Consume(Frame("tx"u8, Transaction()), out _));
+        Assert.AreEqual(0, sink.Commits);
+    }
+
+    private sealed class PayloadSink : ITransactionPayloadSink
+    {
+        internal MemoryStream Bytes { get; } = new();
+        internal Action? Callback { get; set; }
+        public void OnTransactionPayload(ReadOnlySpan<byte> bytes) { Bytes.Write(bytes); Callback?.Invoke(); }
+    }
+
+    [TestMethod]
     public void MempoolRequiresReadySessionAndProducesAnEmptyAcknowledgedCommand()
     {
         using var created = new BsvPeerObservationSession(Magic, 4_000_000, 70001, new Sink());
@@ -369,9 +417,9 @@ public sealed class BsvPeerObservationSessionTests
         Assert.AreEqual(0, sink.Commits);
     }
 
-    private static BsvPeerObservationSession Ready(Sink? sink = null, int maximumInventoryCount = 3)
+    private static BsvPeerObservationSession Ready(Sink? sink = null, int maximumInventoryCount = 3, ITransactionPayloadSink? payloadSink = null)
     {
-        var session = new BsvPeerObservationSession(Magic, 4_000_000, 70001, sink ?? new Sink(), maximumInventoryCount, 2);
+        var session = new BsvPeerObservationSession(Magic, 4_000_000, 70001, sink ?? new Sink(), payloadSink, maximumInventoryCount, 2);
         var local = Version(1);
         Assert.AreEqual(OperationStatus.Done, session.StartHandshake(local, 1_048_576));
         _ = DrainWrites(session);

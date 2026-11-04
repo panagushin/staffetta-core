@@ -34,6 +34,7 @@ internal sealed class BsvPeerSessionFrameProcessor :
     private readonly BsvTransactionMonetaryRangeValidator _monetaryValidator;
     private readonly LegacyTransactionParser _transactionParser;
     private readonly BsvPeerObservationBuffers? _observations;
+    private readonly ITransactionPayloadSink? _payloadSink;
 
     private FrameRoute _activeRoute;
     private ulong _activePayloadLength;
@@ -50,9 +51,10 @@ internal sealed class BsvPeerSessionFrameProcessor :
     internal BsvPeerSessionFrameProcessor(
         int minimumPeerProtocolVersion,
         ILegacyTransactionSink transactionSink,
-        BsvPeerObservationBuffers? observations = null)
+        BsvPeerObservationBuffers? observations = null, ITransactionPayloadSink? payloadSink = null)
     {
         _observations = observations;
+        _payloadSink = payloadSink;
         _handshakeProcessor = new BsvHandshakeFrameProcessor(
             minimumPeerProtocolVersion,
             trackEgressProvenance: true);
@@ -414,6 +416,7 @@ internal sealed class BsvPeerSessionFrameProcessor :
 
     private OperationStatus ConsumeTransactionPayload(ReadOnlySpan<byte> payload)
     {
+        _payloadSink?.OnTransactionPayload(payload);
         var status = _transactionParser.Consume(payload, out var bytesConsumed);
         if (bytesConsumed != payload.Length)
         {

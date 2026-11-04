@@ -15,8 +15,11 @@ witness transactions and additional network profiles are not implemented.
 Internal transport actors and planners are not a supported library API.
 `BsvPeerObservationSession` exposes a bounded sans-IO observation driver:
 caller-owned writes with explicit acknowledgement, validated inventory and
-headers, and streamed transaction callbacks. The caller owns I/O, scheduling,
-staging and recovery. `BsvSelectedHeaderChain` provides contextual header
+headers, and streamed transaction callbacks. An optional `ITransactionPayloadSink`
+receives borrowed raw payload chunks without wire headers; these remain
+provisional until the transaction sink commits. The caller bounds ingress
+steps and owns I/O, scheduling, storage, staging and recovery.
+`BsvSelectedHeaderChain` provides contextual header
 admission over explicitly trusted bootstrap history; it does not authenticate
 that initial trust anchor or prove transaction inclusion.
 No API compatibility or production-readiness commitment is made before

@@ -70,14 +70,14 @@ public sealed class BsvPeerSessionIngressAdapter :
         ulong maximumPayloadLength,
         int minimumPeerProtocolVersion,
         ILegacyTransactionSink transactionSink,
-        BsvPeerObservationBuffers? observations)
+        BsvPeerObservationBuffers? observations, ITransactionPayloadSink? payloadSink = null)
     {
         _processor = new BsvPeerSessionFrameProcessor(
             minimumPeerProtocolVersion,
             new GuardedTransactionSink(
                 this,
                 transactionSink ?? throw new ArgumentNullException(nameof(transactionSink))),
-            observations);
+            observations, payloadSink is null ? null : new GuardedPayloadSink(this, payloadSink));
         _ingress = new MessageIngressStateMachine(
             expectedNetworkMagic,
             maximumPayloadLength,
@@ -693,6 +693,15 @@ public sealed class BsvPeerSessionIngressAdapter :
         {
             throw new InvalidOperationException(
                 "A transaction sink attempted to re-enter the peer session.");
+        }
+    }
+
+    private sealed class GuardedPayloadSink(BsvPeerSessionIngressAdapter owner, ITransactionPayloadSink inner) : ITransactionPayloadSink
+    {
+        public void OnTransactionPayload(ReadOnlySpan<byte> bytes)
+        {
+            inner.OnTransactionPayload(bytes);
+            owner.ThrowIfCallbackReentered();
         }
     }
 

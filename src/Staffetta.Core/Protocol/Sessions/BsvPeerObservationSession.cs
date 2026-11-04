@@ -51,10 +51,19 @@ public sealed class BsvPeerObservationSession : IDisposable
     public BsvPeerObservationSession(ReadOnlySpan<byte> networkMagic, ulong maximumPayloadLength,
         int minimumPeerProtocolVersion, ILegacyTransactionSink transactionSink,
         int maximumInventoryCount = 50_000, int maximumHeaderCount = 2_000)
+        : this(networkMagic, maximumPayloadLength, minimumPeerProtocolVersion, transactionSink, null,
+            maximumInventoryCount, maximumHeaderCount)
+    {
+    }
+
+    /// <summary>Creates a session with optional provisional raw payload capture and explicit control-record limits.</summary>
+    public BsvPeerObservationSession(ReadOnlySpan<byte> networkMagic, ulong maximumPayloadLength,
+        int minimumPeerProtocolVersion, ILegacyTransactionSink transactionSink, ITransactionPayloadSink? payloadSink,
+        int maximumInventoryCount = 50_000, int maximumHeaderCount = 2_000)
     {
         _observations = new BsvPeerObservationBuffers(maximumInventoryCount, maximumHeaderCount);
         _session = new BsvPeerSessionIngressAdapter(networkMagic, maximumPayloadLength,
-            minimumPeerProtocolVersion, transactionSink, _observations);
+            minimumPeerProtocolVersion, transactionSink, _observations, payloadSink);
         _magic = networkMagic.ToArray();
     }
 
